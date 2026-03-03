@@ -4,6 +4,11 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const API_KEY = () => process.env.OPENROUTER_API_KEY || "";
 const MODEL = () => process.env.OPENROUTER_MODEL || "anthropic/claude-sonnet-4.5";
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 interface OpenRouterResponse {
   choices: { message: { content: string } }[];
   usage?: {
@@ -16,12 +21,12 @@ interface OpenRouterResponse {
 async function chat(
   label: string,
   systemPrompt: string,
-  userMessage: string,
+  messages: ChatMessage[],
   maxTokens: number
 ): Promise<string> {
-  const inputChars = systemPrompt.length + userMessage.length;
-  const estimatedInputTokens = Math.ceil(inputChars / 4);
-  console.log(`[${label}] Enviando ~${estimatedInputTokens} tokens (estimado) | max_tokens: ${maxTokens}`);
+  const totalChars = systemPrompt.length + messages.reduce((acc, m) => acc + m.content.length, 0);
+  const estimatedInputTokens = Math.ceil(totalChars / 4);
+  console.log(`[${label}] Enviando ~${estimatedInputTokens} tokens (estimado) | mensajes: ${messages.length} | max_tokens: ${maxTokens}`);
 
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
@@ -34,7 +39,7 @@ async function chat(
       max_tokens: maxTokens,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
+        ...messages,
       ],
     }),
   });
@@ -57,6 +62,7 @@ async function chat(
 
 const SYSTEM_PROMPT = `Eres un asistente experto en bases de datos de Aspel SAE 9.0 (Firebird SQL).
 Tu trabajo es convertir preguntas en español sobre el sistema SAE a queries SQL válidas para Firebird.
+El usuario puede hacer preguntas de seguimiento que se refieren a preguntas anteriores. Usa el contexto de la conversación para entender referencias implícitas.
 
 ${SAE_SCHEMA}
 
@@ -83,13 +89,19 @@ interface SQLResult {
   explanation: string;
 }
 
-export async function generateSQL(question: string): Promise<SQLResult> {
-  const text = await chat(
-    "generateSQL",
-    SYSTEM_PROMPT,
-    `Genera un query SQL de Firebird para responder esta pregunta: "${question}"\n\nResponde SOLO con el JSON, sin markdown ni texto adicional.`,
-    1024
-  );
+export async function generateSQL(
+  question: string,
+  history: ChatMessage[] = []
+): Promise<SQLResult> {
+  const messages: ChatMessage[] = [
+    ...history,
+    {
+      role: "user",
+      content: `Genera un query SQL de Firebird para responder esta pregunta: "${question}"\n\nResponde SOLO con el JSON, sin markdown ni texto adicional.`,
+    },
+  ];
+
+  const text = await chat("generateSQL", SYSTEM_PROMPT, messages, 1024);
 
   const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 
@@ -119,7 +131,10 @@ Debes responder en español, de forma clara y natural, como si le explicaras los
 Si los datos incluyen montos, formatea los números con separadores de miles y dos decimales.
 Si hay fechas, preséntalas en formato legible (ej: "15 de enero de 2024").
 Si no hay resultados, explica qué podría significar.`,
-    `El usuario preguntó: "${question}"
+    [
+      {
+        role: "user",
+        content: `El usuario preguntó: "${question}"
 
 Se ejecutó este SQL: ${sql}
 
@@ -128,6 +143,8 @@ Se obtuvieron ${rowCount} resultado(s). Aquí están los datos (máximo 20 filas
 ${JSON.stringify(resultsPreview, null, 2)}
 
 Interpreta estos resultados de forma clara y natural en español. Si hay muchos datos, haz un resumen útil.`,
+      },
+    ],
     2048
   );
 }

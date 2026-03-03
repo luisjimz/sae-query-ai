@@ -1,165 +1,167 @@
 export const SAE_SCHEMA = `
-## Base de datos: Aspel SAE 9.0 (Firebird)
+## Base de datos: Aspel SAE 9.0 (Firebird 2.5)
 Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedores, facturación y compras.
+Todos los tipos verificados directo de la BD real.
 
 ---
 
 ### INVE02 — Catálogo de Productos/Inventario
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| CVE_ART | VARCHAR | Clave del artículo (PK) |
-| DESCR | VARCHAR | Descripción del producto |
-| LIN_PROD | VARCHAR | Línea de producto |
-| UNI_MED | VARCHAR | Unidad de medida |
-| UNI_EMP | VARCHAR | Unidad de empaque |
-| CTRL_ALM | CHAR(1) | Control por almacén (S/N) |
-| EXIST | NUMERIC | Existencia actual |
-| STOCK_MIN | NUMERIC | Stock mínimo |
-| STOCK_MAX | NUMERIC | Stock máximo |
-| COSTO_PROM | NUMERIC | Costo promedio |
-| ULT_COSTO | NUMERIC | Último costo |
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CVE_ART | VARCHAR(16) | Clave del artículo (PK) |
+| DESCR | VARCHAR(1000) | Descripción del producto |
+| LIN_PROD | VARCHAR(5) | Línea de producto |
+| UNI_MED | VARCHAR(10) | Unidad de medida |
+| UNI_EMP | DOUBLE | Unidad de empaque (factor) |
+| CTRL_ALM | VARCHAR(10) | Control por almacén |
+| EXIST | DOUBLE | Existencia actual |
+| STOCK_MIN | DOUBLE | Stock mínimo |
+| STOCK_MAX | DOUBLE | Stock máximo |
+| COSTO_PROM | DOUBLE | Costo promedio |
+| ULT_COSTO | DOUBLE | Último costo |
 | FCH_ULTCOM | TIMESTAMP | Fecha última compra |
 | FCH_ULTVTA | TIMESTAMP | Fecha última venta |
-| VTAS_ANL_C | NUMERIC | Ventas anuales (cantidad) |
-| VTAS_ANL_M | NUMERIC | Ventas anuales (monto) |
-| COMP_ANL_C | NUMERIC | Compras anuales (cantidad) |
-| COMP_ANL_M | NUMERIC | Compras anuales (monto) |
-| CVE_ESQIMPU | VARCHAR | Clave esquema de impuestos |
-| STATUS | CHAR(1) | Estatus (A=Activo, B=Baja) |
-| CON_SERIE | CHAR(1) | Maneja número de serie (S/N) |
-| CON_LOTE | CHAR(1) | Maneja lote (S/N) |
-| PESO | NUMERIC | Peso del producto |
-| VOLUMEN | NUMERIC | Volumen del producto |
-| CVE_PRODSERV | VARCHAR | Clave producto/servicio SAT |
-| CVE_UNIDAD | VARCHAR | Clave unidad SAT |
+| VTAS_ANL_C | DOUBLE | Ventas anuales (cantidad) |
+| VTAS_ANL_M | DOUBLE | Ventas anuales (monto) |
+| COMP_ANL_C | DOUBLE | Compras anuales (cantidad) |
+| COMP_ANL_M | DOUBLE | Compras anuales (monto) |
+| CVE_ESQIMPU | INTEGER | Clave esquema de impuestos |
+| STATUS | VARCHAR(1) | Estatus (A=Activo, B=Baja) |
+| CON_SERIE | VARCHAR(1) | Maneja número de serie (S/N) |
+| CON_LOTE | VARCHAR(1) | Maneja lote (S/N) |
+| PESO | DOUBLE | Peso del producto |
+| VOLUMEN | DOUBLE | Volumen del producto |
+| CVE_PRODSERV | VARCHAR(9) | Clave producto/servicio SAT |
+| CVE_UNIDAD | VARCHAR(4) | Clave unidad SAT |
 | NUM_MON | INTEGER | Número de moneda |
-| APART | NUMERIC | Apartados |
-| PEND_SURT | NUMERIC | Pendiente por surtir |
-| TIP_COSTEO | CHAR(1) | Tipo de costeo |
-| PREFIJO | VARCHAR | Prefijo talla/color |
-| TALLA | VARCHAR | Talla |
-| COLOR | VARCHAR | Color |
+| APART | DOUBLE | Apartados |
+| PEND_SURT | DOUBLE | Pendiente por surtir |
+| TIP_COSTEO | VARCHAR(1) | Tipo de costeo |
+| PREFIJO | VARCHAR(8) | Prefijo talla/color |
+| TALLA | VARCHAR(8) | Talla |
+| COLOR | VARCHAR(8) | Color |
 
 ---
 
 ### CLIE02 — Catálogo de Clientes
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| CLAVE | VARCHAR | Clave del cliente (PK) |
-| STATUS | CHAR(1) | Estatus (A=Activo, B=Baja) |
-| NOMBRE | VARCHAR | Nombre o razón social |
-| RFC | VARCHAR | RFC del cliente |
-| CALLE | VARCHAR | Calle |
-| NUMINT | VARCHAR | Número interior |
-| NUMEXT | VARCHAR | Número exterior |
-| COLONIA | VARCHAR | Colonia |
-| CODIGO | VARCHAR | Código postal |
-| LOCALIDAD | VARCHAR | Localidad |
-| MUNICIPIO | VARCHAR | Municipio |
-| ESTADO | VARCHAR | Estado |
-| PAIS | VARCHAR | País |
-| TELEFONO | VARCHAR | Teléfono |
-| MAIL | VARCHAR | Correo electrónico |
-| CLASIFIC | VARCHAR | Clasificación |
-| CON_CREDITO | CHAR(1) | Tiene crédito (S/N) |
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CLAVE | VARCHAR(10) | Clave del cliente (PK). Alfanumérica ej: 'B0000008502' |
+| STATUS | VARCHAR(1) | Estatus (A=Activo, B=Baja) |
+| NOMBRE | VARCHAR(254) | Nombre o razón social |
+| RFC | VARCHAR(15) | RFC del cliente |
+| CALLE | VARCHAR(80) | Calle |
+| NUMINT | VARCHAR(15) | Número interior |
+| NUMEXT | VARCHAR(15) | Número exterior |
+| COLONIA | VARCHAR(50) | Colonia |
+| CODIGO | VARCHAR(5) | Código postal |
+| LOCALIDAD | VARCHAR(50) | Localidad |
+| MUNICIPIO | VARCHAR(50) | Municipio |
+| ESTADO | VARCHAR(50) | Estado |
+| PAIS | VARCHAR(50) | País |
+| TELEFONO | VARCHAR(25) | Teléfono |
+| EMAILPRED | VARCHAR(512) | Correo electrónico (campo real de email) |
+| CLASIFIC | VARCHAR(5) | Clasificación |
+| CON_CREDITO | VARCHAR(1) | Tiene crédito (S/N) |
 | DIASCRED | INTEGER | Días de crédito |
-| LIMCRED | NUMERIC | Límite de crédito |
-| SALDO | NUMERIC | Saldo actual |
+| LIMCRED | DOUBLE | Límite de crédito |
+| SALDO | DOUBLE | Saldo actual |
 | LISTA_PREC | INTEGER | Lista de precios asignada |
-| DESCUENTO | NUMERIC | Descuento general |
-| CVE_VEND | VARCHAR | Clave del vendedor asignado |
-| CVE_ZONA | VARCHAR | Clave de zona |
-| VENTAS | NUMERIC | Total de ventas |
-| ULT_VENTAD | TIMESTAMP | Última venta (fecha) |
-| PROSPECTO | CHAR(1) | Es prospecto (S/N) |
-| USO_CFDI | VARCHAR | Uso de CFDI |
-| REG_FISC | VARCHAR | Régimen fiscal |
-| FORMADEPAGOSAT | VARCHAR | Forma de pago SAT |
-| NOMBRECOMERCIAL | VARCHAR | Nombre comercial |
+| DESCUENTO | DOUBLE | Descuento general |
+| CVE_VEND | VARCHAR(5) | Clave del vendedor asignado |
+| CVE_ZONA | VARCHAR(6) | Clave de zona |
+| VENTAS | DOUBLE | Total de ventas acumuladas |
+| ULT_VENTAD | VARCHAR(20) | Clave del último documento de venta (NO es fecha, es VARCHAR) |
+| ULT_PAGOF | TIMESTAMP | Fecha del último pago |
+| FCH_ULTCOM | TIMESTAMP | Fecha última compra |
+| PROSPECTO | VARCHAR(1) | Es prospecto (S/N) |
+| USO_CFDI | VARCHAR(5) | Uso de CFDI |
+| REG_FISC | VARCHAR(4) | Régimen fiscal |
+| FORMADEPAGOSAT | VARCHAR(5) | Forma de pago SAT |
+| NOMBRECOMERCIAL | VARCHAR(254) | Nombre comercial |
 
 ---
 
 ### PROV02 — Catálogo de Proveedores
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| CLAVE | VARCHAR | Clave del proveedor (PK) |
-| STATUS | CHAR(1) | Estatus (A=Activo, B=Baja) |
-| NOMBRE | VARCHAR | Nombre o razón social |
-| RFC | VARCHAR | RFC del proveedor |
-| CALLE | VARCHAR | Calle |
-| NUMINT | VARCHAR | Número interior |
-| NUMEXT | VARCHAR | Número exterior |
-| COLONIA | VARCHAR | Colonia |
-| CODIGO | VARCHAR | Código postal |
-| MUNICIPIO | VARCHAR | Municipio |
-| ESTADO | VARCHAR | Estado |
-| CVE_PAIS | VARCHAR | Clave de país |
-| TELEFONO | VARCHAR | Teléfono |
-| CLASIFIC | VARCHAR | Clasificación |
-| CON_CREDITO | CHAR(1) | Tiene crédito (S/N) |
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CLAVE | VARCHAR(10) | Clave del proveedor (PK). Alfanumérica. |
+| STATUS | VARCHAR(1) | Estatus (A=Activo, B=Baja) |
+| NOMBRE | VARCHAR(254) | Nombre o razón social |
+| RFC | VARCHAR(15) | RFC del proveedor |
+| CALLE | VARCHAR(80) | Calle |
+| NUMINT | VARCHAR(15) | Número interior |
+| NUMEXT | VARCHAR(15) | Número exterior |
+| COLONIA | VARCHAR(50) | Colonia |
+| CODIGO | VARCHAR(5) | Código postal |
+| MUNICIPIO | VARCHAR(50) | Municipio |
+| ESTADO | VARCHAR(50) | Estado |
+| TELEFONO | VARCHAR(25) | Teléfono |
+| CLASIFIC | VARCHAR(5) | Clasificación |
+| CON_CREDITO | VARCHAR(1) | Tiene crédito (S/N) |
 | DIASCRED | INTEGER | Días de crédito |
-| LIMCRED | NUMERIC | Límite de crédito |
-| SALDO | NUMERIC | Saldo actual |
-| VENTAS | NUMERIC | Total de compras |
+| LIMCRED | DOUBLE | Límite de crédito |
+| SALDO | DOUBLE | Saldo actual |
+| VENTAS | DOUBLE | Total de compras acumuladas |
 
 ---
 
 ### FACTF02 — Facturas (Documentos de venta)
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| TIP_DOC | CHAR(1) | Tipo de documento (F=Factura) |
-| CVE_DOC | VARCHAR | Clave/número de documento (PK junto con TIP_DOC) |
-| CVE_CLPV | VARCHAR | Clave del cliente |
-| STATUS | CHAR(1) | Estatus (E=Elaborado, C=Cancelado, P=Pendiente) |
-| CVE_VEND | VARCHAR | Clave del vendedor |
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| TIP_DOC | VARCHAR(1) | Tipo de documento (F=Factura) |
+| CVE_DOC | VARCHAR(20) | Clave/número de documento (PK junto con TIP_DOC) |
+| CVE_CLPV | VARCHAR(10) | Clave del cliente (FK a CLIE02.CLAVE) |
+| STATUS | VARCHAR(1) | Estatus (E=Elaborado, C=Cancelado, P=Pendiente) |
+| CVE_VEND | VARCHAR(5) | Clave del vendedor |
 | FECHA_DOC | TIMESTAMP | Fecha del documento |
 | FECHA_ENT | TIMESTAMP | Fecha de entrega |
 | FECHA_VEN | TIMESTAMP | Fecha de vencimiento |
 | FECHA_CANCELA | TIMESTAMP | Fecha de cancelación |
-| CAN_TOT | NUMERIC | Cantidad total |
-| IMP_TOT1 | NUMERIC | Impuesto total 1 (IVA) |
-| IMP_TOT2 | NUMERIC | Impuesto total 2 |
-| IMP_TOT3 | NUMERIC | Impuesto total 3 |
-| IMP_TOT4 | NUMERIC | Impuesto total 4 |
-| DES_TOT | NUMERIC | Descuento total |
-| DES_FIN | NUMERIC | Descuento financiero |
-| COM_TOT | NUMERIC | Comisión total |
-| IMPORTE | NUMERIC | Importe (subtotal) |
-| CONDICION | VARCHAR | Condición de pago |
+| CAN_TOT | DOUBLE | Cantidad total |
+| IMP_TOT1 | DOUBLE | Impuesto total 1 (IVA) |
+| IMP_TOT2 | DOUBLE | Impuesto total 2 |
+| IMP_TOT3 | DOUBLE | Impuesto total 3 |
+| IMP_TOT4 | DOUBLE | Impuesto total 4 |
+| DES_TOT | DOUBLE | Descuento total |
+| DES_FIN | DOUBLE | Descuento financiero |
+| COM_TOT | DOUBLE | Comisión total |
+| IMPORTE | DOUBLE | Importe (subtotal) |
+| CONDICION | VARCHAR(25) | Condición de pago |
 | NUM_ALMA | INTEGER | Número de almacén |
 | NUM_MONED | INTEGER | Número de moneda |
-| TIPCAMB | NUMERIC | Tipo de cambio |
-| SERIE | VARCHAR | Serie del documento |
-| FOLIO | NUMERIC | Folio del documento |
-| CONTADO | CHAR(1) | Es de contado (S/N) |
-| UUID | VARCHAR | UUID del CFDI |
-| USO_CFDI | VARCHAR | Uso de CFDI |
-| FORMADEPAGOSAT | VARCHAR | Forma de pago SAT |
+| TIPCAMB | DOUBLE | Tipo de cambio |
+| SERIE | VARCHAR(10) | Serie del documento |
+| FOLIO | INTEGER | Folio del documento |
+| CONTADO | VARCHAR(1) | Es de contado (S/N) |
+| UUID | VARCHAR(50) | UUID del CFDI |
+| USO_CFDI | VARCHAR(5) | Uso de CFDI |
+| FORMADEPAGOSAT | VARCHAR(5) | Forma de pago SAT |
 | FECHAELAB | TIMESTAMP | Fecha de elaboración |
 
 ---
 
 ### PAR_FACTF02 — Partidas (detalle) de Facturas
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| CVE_DOC | VARCHAR | Clave del documento (FK a FACTF02) |
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CVE_DOC | VARCHAR(20) | Clave del documento (FK a FACTF02) |
 | NUM_PAR | INTEGER | Número de partida |
-| CVE_ART | VARCHAR | Clave del artículo (FK a INVE02) |
-| CANT | NUMERIC | Cantidad |
-| PREC | NUMERIC | Precio unitario |
-| COST | NUMERIC | Costo |
-| IMPU1 | NUMERIC | % Impuesto 1 |
-| TOTIMP1 | NUMERIC | Total impuesto 1 |
-| DESC1 | NUMERIC | % Descuento 1 |
-| DESC2 | NUMERIC | % Descuento 2 |
-| DESC3 | NUMERIC | % Descuento 3 |
+| CVE_ART | VARCHAR(16) | Clave del artículo (FK a INVE02) |
+| CANT | DOUBLE | Cantidad |
+| PREC | DOUBLE | Precio unitario |
+| COST | DOUBLE | Costo |
+| IMPU1 | DOUBLE | % Impuesto 1 |
+| TOTIMP1 | DOUBLE | Total impuesto 1 |
+| DESC1 | DOUBLE | % Descuento 1 |
+| DESC2 | DOUBLE | % Descuento 2 |
+| DESC3 | DOUBLE | % Descuento 3 |
 | NUM_ALM | INTEGER | Número de almacén |
-| UNI_VENTA | VARCHAR | Unidad de venta |
-| TOT_PARTIDA | NUMERIC | Total de la partida |
-| DESCR_ART | VARCHAR | Descripción del artículo |
-| PREC_NETO | NUMERIC | Precio neto |
-| CVE_PRODSERV | VARCHAR | Clave producto/servicio SAT |
-| CVE_UNIDAD | VARCHAR | Clave unidad SAT |
+| UNI_VENTA | VARCHAR(10) | Unidad de venta |
+| TOT_PARTIDA | DOUBLE | Total de la partida |
+| DESCR_ART | VARCHAR(1000) | Descripción del artículo |
+| PREC_NETO | DOUBLE | Precio neto |
+| CVE_PRODSERV | VARCHAR(9) | Clave producto/servicio SAT |
+| CVE_UNIDAD | VARCHAR(4) | Clave unidad SAT |
 
 ---
 
@@ -191,10 +193,22 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 - **NO usar LIMIT**. Usar \`SELECT FIRST N\` en su lugar. Ejemplo: \`SELECT FIRST 10 * FROM INVE02\`
 - Usar \`CONTAINING\` para búsquedas parciales case-insensitive. Ejemplo: \`WHERE DESCR CONTAINING 'tornillo'\`
 - Usar \`TRIM()\` en campos de texto al comparar para eliminar espacios. Ejemplo: \`WHERE TRIM(CVE_ART) = 'ABC123'\`
-- Las fechas se manejan como TIMESTAMP en Firebird
-- Para filtrar por fecha: \`WHERE FECHA_DOC >= '2024-01-01' AND FECHA_DOC < '2024-02-01'\`
+- Las fechas son TIMESTAMP. Para filtrar: \`WHERE FECHA_DOC >= '2024-01-01' AND FECHA_DOC < '2024-02-01'\`
 - Los campos de texto pueden tener espacios al final, siempre usar TRIM() al comparar
 - Para concatenar strings usar \`||\`
 - Para contar registros: \`SELECT COUNT(*) FROM tabla\`
 - Para sumar: \`SELECT SUM(campo) FROM tabla\`
+- Para fecha actual usar \`CURRENT_TIMESTAMP\`. No usar funciones como DATEADD si no es necesario.
+
+### IMPORTANTE: Tipos de datos de campos clave
+- **Todas las claves (CLAVE, CVE_DOC, CVE_CLPV, CVE_ART, CVE_VEND) son VARCHAR, NUNCA numéricas.** Siempre comparar con strings entre comillas simples.
+- CLIE02.CLAVE → formato como 'B0000008502'. SIEMPRE usar string.
+- FACTF02.CVE_CLPV → es la clave del cliente, mismo formato que CLIE02.CLAVE. SIEMPRE string.
+- En JOINs usar TRIM() en ambos lados: \`TRIM(FACTF02.CVE_CLPV) = TRIM(CLIE02.CLAVE)\`
+- **NUNCA hacer cast a número ni comparar estos campos con valores numéricos sin comillas.**
+- Los campos numéricos (montos, cantidades, costos) son DOUBLE, no NUMERIC.
+- CLIE02.ULT_VENTAD es VARCHAR(20) = clave del último documento de venta, NO es una fecha.
+- Para fecha de última venta de un cliente, usar FACTF02.FECHA_DOC con JOIN.
+- CLIE02.EMAILPRED es el campo real de email (VARCHAR 512). CLIE02.MAIL es VARCHAR(1), no usar para email.
+- FACTF02.FOLIO es INTEGER, no VARCHAR.
 `;

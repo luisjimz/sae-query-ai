@@ -4,8 +4,40 @@ import { serve } from "@hono/node-server";
 import { query } from "./db.js";
 import { testConnection } from "./db.js";
 import { generateSQL, interpretResults } from "./ai.js";
+import type { ChatMessage } from "./ai.js";
+import crypto from "crypto";
 
 const app = new Hono();
+
+// --- Session store (in-memory) ---
+const MAX_HISTORY = 10; // últimos 10 intercambios por sesión
+
+interface Session {
+  history: ChatMessage[];
+  lastActive: number;
+}
+
+const sessions = new Map<string, Session>();
+
+function getSession(sessionId?: string): { id: string; session: Session } {
+  if (sessionId && sessions.has(sessionId)) {
+    const session = sessions.get(sessionId)!;
+    session.lastActive = Date.now();
+    return { id: sessionId, session };
+  }
+  const id = crypto.randomUUID();
+  const session: Session = { history: [], lastActive: Date.now() };
+  sessions.set(id, session);
+  return { id, session };
+}
+
+// Limpiar sesiones inactivas cada 30 min
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, s] of sessions) {
+    if (s.lastActive < cutoff) sessions.delete(id);
+  }
+}, 10 * 60 * 1000);
 
 // --- Validación de seguridad ---
 const BLOCKED_KEYWORDS = [
@@ -42,18 +74,30 @@ app.get("/api/health", async (c) => {
 
 app.post("/api/ask", async (c) => {
   try {
-    const body = await c.req.json<{ question: string }>();
-    const { question } = body;
+    const body = await c.req.json<{ question: string; sessionId?: string }>();
+    const { question, sessionId: reqSessionId } = body;
 
     if (!question || question.trim().length === 0) {
       return c.json({ error: "La pregunta no puede estar vacía" }, 400);
     }
 
-    // 1. Generar SQL con Claude
-    const { sql, explanation } = await generateSQL(question);
+    const { id: sessionId, session } = getSession(reqSessionId);
+
+    // 1. Generar SQL con Claude (con historial de conversación)
+    const { sql, explanation } = await generateSQL(question, session.history);
 
     if (!sql) {
+      // Guardar en historial incluso si no generó SQL
+      session.history.push(
+        { role: "user", content: question },
+        { role: "assistant", content: `No se pudo generar SQL: ${explanation}` }
+      );
+      if (session.history.length > MAX_HISTORY * 2) {
+        session.history = session.history.slice(-MAX_HISTORY * 2);
+      }
+
       return c.json({
+        sessionId,
         question,
         sql: "",
         rowCount: 0,
@@ -75,13 +119,37 @@ app.post("/api/ask", async (c) => {
     }
 
     // 3. Ejecutar contra Firebird
-    const results = await query(sql);
+    let results: Record<string, unknown>[];
+    try {
+      results = await query(sql);
+    } catch (dbError) {
+      const dbMsg = dbError instanceof Error ? dbError.message : "Error de base de datos";
+      console.error("Error SQL:", sql, dbMsg);
+      return c.json({
+        sessionId,
+        question,
+        sql,
+        rowCount: 0,
+        results: [],
+        answer: `Error al ejecutar la consulta en la base de datos: ${dbMsg}\n\nSQL generado: ${sql}`,
+      });
+    }
     const rowCount = results.length;
 
     // 4. Interpretar resultados con Claude
     const answer = await interpretResults(question, sql, results, rowCount);
 
+    // 5. Guardar en historial
+    session.history.push(
+      { role: "user", content: question },
+      { role: "assistant", content: `SQL: ${sql}\nResultados: ${rowCount} filas.\nRespuesta: ${answer}` }
+    );
+    if (session.history.length > MAX_HISTORY * 2) {
+      session.history = session.history.slice(-MAX_HISTORY * 2);
+    }
+
     return c.json({
+      sessionId,
       question,
       sql,
       rowCount,
@@ -222,8 +290,18 @@ const HTML = `<!DOCTYPE html>
 
     .message .answer {
       line-height: 1.6;
-      white-space: pre-wrap;
     }
+
+    .message .answer p { margin-bottom: 0.5rem; }
+    .message .answer p:last-child { margin-bottom: 0; }
+    .message .answer h2 { font-size: 1.15rem; color: #7c83ff; margin: 0.75rem 0 0.4rem; }
+    .message .answer h3 { font-size: 1.05rem; color: #7c83ff; margin: 0.6rem 0 0.3rem; }
+    .message .answer h4 { font-size: 0.95rem; color: #9a9eff; margin: 0.5rem 0 0.25rem; }
+    .message .answer strong { color: #fff; }
+    .message .answer em { color: #bbb; font-style: italic; }
+    .message .answer code { background: #0d0d1a; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #c8c8ff; }
+    .message .answer ul { margin: 0.4rem 0; padding-left: 1.5rem; }
+    .message .answer li { margin-bottom: 0.25rem; }
 
     .message .toggle-details {
       background: none;
@@ -442,6 +520,7 @@ const HTML = `<!DOCTYPE html>
     const statusDot = document.getElementById('statusDot');
     const emptyState = document.getElementById('emptyState');
     let isLoading = false;
+    let sessionId = null;
 
     // Check health
     fetch('/api/health')
@@ -500,11 +579,13 @@ const HTML = `<!DOCTYPE html>
         const res = await fetch('/api/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ question, sessionId }),
         });
 
         const data = await res.json();
         loadingEl.remove();
+
+        if (data.sessionId) sessionId = data.sessionId;
 
         if (data.error) {
           const errEl = document.createElement('div');
@@ -542,7 +623,7 @@ const HTML = `<!DOCTYPE html>
           const detId = 'det-' + Date.now();
           msgEl.innerHTML =
             '<div class="label">Respuesta</div>' +
-            '<div class="answer">' + escapeHtml(data.answer) + '</div>' +
+            '<div class="answer">' + renderMarkdown(data.answer) + '</div>' +
             (data.sql ? '<button class="toggle-details" onclick="toggleDetails(\\'' + detId + '\\')">Ver detalles tecnicos</button>' : '') +
             detailsHtml.replace(/id="det-\\d+"/, 'id="' + detId + '"');
 
@@ -571,6 +652,29 @@ const HTML = `<!DOCTYPE html>
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+      let html = escapeHtml(text);
+      // Headers
+      html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+      html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+      // Bold
+      html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+      // Italic
+      html = html.replace(/(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)/g, '<em>$1</em>');
+      // Inline code
+      html = html.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+      // Unordered lists
+      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, '<ul>$1</ul>');
+      // Ordered lists
+      html = html.replace(/^\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
+      // Line breaks (double newline = paragraph)
+      html = html.replace(/\\n\\n/g, '</p><p>');
+      html = html.replace(/\\n/g, '<br>');
+      return '<p>' + html + '</p>';
     }
 
     inputEl.focus();
