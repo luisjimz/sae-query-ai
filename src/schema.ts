@@ -4,7 +4,7 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 
 ---
 
-### INVE01 — Catálogo de Productos/Inventario
+### INVE02 — Catálogo de Productos/Inventario
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | CVE_ART | VARCHAR | Clave del artículo (PK) |
@@ -42,7 +42,7 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 
 ---
 
-### CLIE01 — Catálogo de Clientes
+### CLIE02 — Catálogo de Clientes
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | CLAVE | VARCHAR | Clave del cliente (PK) |
@@ -79,7 +79,7 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 
 ---
 
-### PROV01 — Catálogo de Proveedores
+### PROV02 — Catálogo de Proveedores
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | CLAVE | VARCHAR | Clave del proveedor (PK) |
@@ -104,7 +104,7 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 
 ---
 
-### FACTF01 — Facturas (Documentos de venta)
+### FACTF02 — Facturas (Documentos de venta)
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | TIP_DOC | CHAR(1) | Tipo de documento (F=Factura) |
@@ -139,12 +139,12 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 
 ---
 
-### PAR_FACTF01 — Partidas (detalle) de Facturas
+### PAR_FACTF02 — Partidas (detalle) de Facturas
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
-| CVE_DOC | VARCHAR | Clave del documento (FK a FACTF01) |
+| CVE_DOC | VARCHAR | Clave del documento (FK a FACTF02) |
 | NUM_PAR | INTEGER | Número de partida |
-| CVE_ART | VARCHAR | Clave del artículo (FK a INVE01) |
+| CVE_ART | VARCHAR | Clave del artículo (FK a INVE02) |
 | CANT | NUMERIC | Cantidad |
 | PREC | NUMERIC | Precio unitario |
 | COST | NUMERIC | Costo |
@@ -164,31 +164,31 @@ Sistema Administrativo Empresarial - Módulos de inventarios, clientes, proveedo
 ---
 
 ### Otras tablas disponibles
-- **MINVE01** — Movimientos de inventario (campos: CVE_ART, TIPO_MOV, FECHA, CANTIDAD, COSTO, NUM_ALM, CVE_DOC, CONCEPTO)
-- **ALMACENES01** — Catálogo de almacenes (campos: CVE_ALM, DESCR, STATUS)
-- **VEND01** — Catálogo de vendedores (campos: CLAVE, NOMBRE, STATUS, COM_VEN)
-- **ZONA01** — Catálogo de zonas (campos: CLAVE, DESCRIPCION)
-- **MONED01** — Catálogo de monedas (campos: NUM_MONED, DESCRIPCION, TIPCAMB)
-- **IMPU01** — Catálogo de impuestos (campos: CVE_ESQIMPU, DESCRIPCION, PORCENTAJE)
-- **PRECIOS01** — Listas de precios (campos: CVE_ART, NUM_LISTA, PRECIO)
-- **PRVPROD01** — Relación producto-proveedor (campos: CVE_ART, CVE_PROV, COSTO, TIEMPO_ENT)
-- **COMPR01** — Compras (estructura similar a FACTF01: TIP_DOC, CVE_DOC, CVE_CLPV→proveedor, STATUS, FECHA_DOC, IMPORTE, etc.)
-- **PAR_COMPR01** — Partidas de compras (estructura similar a PAR_FACTF01)
+- **MINVE02** — Movimientos de inventario (campos: CVE_ART, TIPO_MOV, FECHA, CANTIDAD, COSTO, NUM_ALM, CVE_DOC, CONCEPTO)
+- **ALMACENES02** — Catálogo de almacenes (campos: CVE_ALM, DESCR, STATUS)
+- **VEND02** — Catálogo de vendedores (campos: CLAVE, NOMBRE, STATUS, COM_VEN)
+- **ZONA02** — Catálogo de zonas (campos: CLAVE, DESCRIPCION)
+- **MONED02** — Catálogo de monedas (campos: NUM_MONED, DESCRIPCION, TIPCAMB)
+- **IMPU02** — Catálogo de impuestos (campos: CVE_ESQIMPU, DESCRIPCION, PORCENTAJE)
+- **PRECIOS02** — Listas de precios (campos: CVE_ART, NUM_LISTA, PRECIO)
+- **PRVPROD02** — Relación producto-proveedor (campos: CVE_ART, CVE_PROV, COSTO, TIEMPO_ENT)
+- **COMPR02** — Compras (estructura similar a FACTF02: TIP_DOC, CVE_DOC, CVE_CLPV→proveedor, STATUS, FECHA_DOC, IMPORTE, etc.)
+- **PAR_COMPR02** — Partidas de compras (estructura similar a PAR_FACTF02)
 
 ---
 
 ### Relaciones principales
-- FACTF01.CVE_CLPV → CLIE01.CLAVE (factura pertenece a un cliente)
-- FACTF01.CVE_VEND → VEND01.CLAVE (factura asignada a un vendedor)
-- PAR_FACTF01.CVE_DOC → FACTF01.CVE_DOC (partidas de una factura)
-- PAR_FACTF01.CVE_ART → INVE01.CVE_ART (artículo en la partida)
-- COMPR01.CVE_CLPV → PROV01.CLAVE (compra pertenece a un proveedor)
-- PAR_COMPR01.CVE_ART → INVE01.CVE_ART (artículo en la partida de compra)
+- FACTF02.CVE_CLPV → CLIE02.CLAVE (factura pertenece a un cliente)
+- FACTF02.CVE_VEND → VEND02.CLAVE (factura asignada a un vendedor)
+- PAR_FACTF02.CVE_DOC → FACTF02.CVE_DOC (partidas de una factura)
+- PAR_FACTF02.CVE_ART → INVE02.CVE_ART (artículo en la partida)
+- COMPR02.CVE_CLPV → PROV02.CLAVE (compra pertenece a un proveedor)
+- PAR_COMPR02.CVE_ART → INVE02.CVE_ART (artículo en la partida de compra)
 
 ---
 
 ### Notas importantes de sintaxis Firebird SQL
-- **NO usar LIMIT**. Usar \`SELECT FIRST N\` en su lugar. Ejemplo: \`SELECT FIRST 10 * FROM INVE01\`
+- **NO usar LIMIT**. Usar \`SELECT FIRST N\` en su lugar. Ejemplo: \`SELECT FIRST 10 * FROM INVE02\`
 - Usar \`CONTAINING\` para búsquedas parciales case-insensitive. Ejemplo: \`WHERE DESCR CONTAINING 'tornillo'\`
 - Usar \`TRIM()\` en campos de texto al comparar para eliminar espacios. Ejemplo: \`WHERE TRIM(CVE_ART) = 'ABC123'\`
 - Las fechas se manejan como TIMESTAMP en Firebird
