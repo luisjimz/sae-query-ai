@@ -2,11 +2,18 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, Tool, ToolUseBlock, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages.mjs";
 import { query, testConnection } from "./db.js";
 import { SAE_SCHEMA } from "./schema.js";
+import { generatePDF, generateExcel, generateDocx } from "./files.js";
 
 const client = new Anthropic();
 
 const MODEL = () => process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-const MAX_TOOL_ITERATIONS = 5;
+const MAX_TOOL_ITERATIONS = 7;
+
+export type StoreFileFn = (entry: {
+  buffer: Buffer;
+  filename: string;
+  contentType: string;
+}) => string;
 
 // --- System Prompt ---
 
@@ -37,7 +44,16 @@ ${SAE_SCHEMA}
 7. Responde SIEMPRE en español, de forma clara y natural, como si le explicaras a un usuario no técnico.
 8. Si los datos incluyen montos, formatea los números con separadores de miles y dos decimales.
 9. Si hay fechas, preséntalas en formato legible (ej: "15 de enero de 2024").
-10. Si no puedes obtener los datos por una razón válida, explícalo claramente en español.`;
+10. Si no puedes obtener los datos por una razón válida, explícalo claramente en español.
+
+## Generación de archivos:
+Cuando el usuario pida un reporte, exportación, o archivo descargable (Excel, PDF, Word/DOCX):
+1. Primero usa \`query_database\` para explorar los datos y confirmar que existen.
+2. Luego usa \`generate_file\` con la misma query (sin FIRST N — se necesitan todos los datos para el archivo).
+3. Incluye el enlace de descarga en tu respuesta usando markdown: [Descargar reporte](url)
+4. Indica el formato, el número de registros incluidos, y el nombre del archivo.
+5. Si el usuario no especificó el formato, usa Excel por defecto.
+6. Proporciona un título descriptivo que incluya el período o filtro aplicado.`;
 
 // --- Tool Definitions ---
 
@@ -72,14 +88,60 @@ const TOOLS: Tool[] = [
       properties: {},
     },
   },
+  {
+    name: "generate_file",
+    description:
+      "Genera un archivo descargable (PDF, Excel o DOCX) con los resultados de una consulta SQL. " +
+      "Usar cuando el usuario pide un reporte, exportación o archivo descargable. " +
+      "SIEMPRE ejecutar primero query_database para verificar que hay datos, " +
+      "luego llamar generate_file con la misma query sin límite de filas.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        sql: {
+          type: "string",
+          description:
+            "La query SQL SELECT para obtener TODOS los datos del archivo. " +
+            "No usar FIRST N — se necesitan todas las filas para el reporte.",
+        },
+        format: {
+          type: "string",
+          enum: ["pdf", "excel", "docx"],
+          description: "Formato del archivo: 'pdf', 'excel' o 'docx'.",
+        },
+        title: {
+          type: "string",
+          description: "Título del reporte. Ej: 'Ventas de Febrero 2024'.",
+        },
+        columns: {
+          type: "array",
+          description: "Definición opcional de columnas con etiquetas legibles.",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string", description: "Nombre del campo SQL." },
+              label: { type: "string", description: "Etiqueta legible." },
+            },
+            required: ["field", "label"],
+          },
+        },
+      },
+      required: ["sql", "format", "title"],
+    },
+  },
 ];
 
 // --- Tool Execution ---
 
+function sanitizeFilename(title: string): string {
+  return title.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_\-]/g, "").slice(0, 60) || "reporte";
+}
+
 async function executeToolCall(
   toolName: string,
   toolInput: Record<string, unknown>,
-  isSafeQuery: (sql: string) => boolean
+  isSafeQuery: (sql: string) => boolean,
+  storeFile: StoreFileFn
 ): Promise<string> {
   if (toolName === "query_database") {
     const sql = toolInput.sql as string;
@@ -126,6 +188,66 @@ async function executeToolCall(
     return JSON.stringify(result);
   }
 
+  if (toolName === "generate_file") {
+    const sql = toolInput.sql as string;
+    const format = toolInput.format as "pdf" | "excel" | "docx";
+    const title = toolInput.title as string;
+    const columns = toolInput.columns as { field: string; label: string }[] | undefined;
+
+    if (!sql || !format || !title) {
+      return JSON.stringify({ error: "Parámetros requeridos: sql, format, title." });
+    }
+
+    if (!isSafeQuery(sql)) {
+      return JSON.stringify({ error: "Query rechazada por seguridad. Solo se permiten consultas SELECT." });
+    }
+
+    try {
+      const data = await query(sql);
+      if (data.length === 0) {
+        return JSON.stringify({ error: "La consulta no devolvió resultados. No se puede generar el archivo." });
+      }
+
+      const fileReq = { data, title, columns };
+      let buffer: Buffer;
+      let contentType: string;
+      let ext: string;
+
+      switch (format) {
+        case "pdf":
+          buffer = await generatePDF(fileReq);
+          contentType = "application/pdf";
+          ext = "pdf";
+          break;
+        case "excel":
+          buffer = await generateExcel(fileReq);
+          contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+          ext = "xlsx";
+          break;
+        case "docx":
+          buffer = await generateDocx(fileReq);
+          contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+          ext = "docx";
+          break;
+      }
+
+      const filename = `${sanitizeFilename(title)}.${ext}`;
+      const url = storeFile({ buffer, filename, contentType });
+
+      return JSON.stringify({
+        ok: true,
+        url,
+        filename,
+        format,
+        rowCount: data.length,
+        mensaje: `Archivo ${format.toUpperCase()} generado con ${data.length} registro(s).`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return JSON.stringify({ error: `Error generando archivo: ${message}` });
+    }
+  }
+
   return JSON.stringify({ error: `Herramienta desconocida: ${toolName}` });
 }
 
@@ -144,7 +266,8 @@ export interface AgentResult {
 export async function runAgent(
   question: string,
   history: MessageParam[],
-  isSafeQueryFn: (sql: string) => boolean
+  isSafeQueryFn: (sql: string) => boolean,
+  storeFile: StoreFileFn
 ): Promise<AgentResult> {
   const messages: MessageParam[] = [
     ...history,
@@ -201,7 +324,8 @@ export async function runAgent(
         const resultStr = await executeToolCall(
           toolUse.name,
           toolUse.input as Record<string, unknown>,
-          isSafeQueryFn
+          isSafeQueryFn,
+          storeFile
         );
 
         // Track last successful DB query for the UI

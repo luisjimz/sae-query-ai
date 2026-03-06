@@ -4,9 +4,35 @@ import { basicAuth } from "hono/basic-auth";
 import { serve } from "@hono/node-server";
 import { testConnection } from "./db.js";
 import { runAgent } from "./agent.js";
+import type { StoreFileFn } from "./agent.js";
 import { isSafeQuery } from "./utils.js";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.mjs";
 import crypto from "crypto";
+
+// --- File store (in-memory) ---
+
+interface FileEntry {
+  buffer: Buffer;
+  filename: string;
+  contentType: string;
+  createdAt: number;
+}
+
+const fileStore = new Map<string, FileEntry>();
+
+const storeFile: StoreFileFn = (entry) => {
+  const id = crypto.randomUUID();
+  fileStore.set(id, { ...entry, createdAt: Date.now() });
+  return `/api/download/${id}`;
+};
+
+// Cleanup expired files every 10 min (expire after 30 min)
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, f] of fileStore) {
+    if (f.createdAt < cutoff) fileStore.delete(id);
+  }
+}, 10 * 60 * 1000);
 
 const app = new Hono();
 
@@ -73,7 +99,8 @@ app.post("/api/ask", async (c) => {
     const { answer, sql, rowCount, results, toolCallCount } = await runAgent(
       question,
       session.history,
-      isSafeQuery
+      isSafeQuery,
+      storeFile
     );
 
     console.log(`[ask] sessionId=${sessionId} toolCalls=${toolCallCount}`);
@@ -101,6 +128,20 @@ app.post("/api/ask", async (c) => {
     console.error("Error en /api/ask:", message);
     return c.json({ error: message }, 500);
   }
+});
+
+app.get("/api/download/:id", (c) => {
+  const id = c.req.param("id");
+  const entry = fileStore.get(id);
+  if (!entry) {
+    return c.json({ error: "Archivo no encontrado o expirado." }, 404);
+  }
+  return new Response(new Uint8Array(entry.buffer), {
+    headers: {
+      "Content-Type": entry.contentType,
+      "Content-Disposition": `attachment; filename="${entry.filename}"`,
+    },
+  });
 });
 
 // --- Frontend UI ---
@@ -411,6 +452,20 @@ const HTML = `<!DOCTYPE html>
 
     .empty-state .icon { font-size: 3rem; opacity: 0.4; }
     .empty-state p { font-size: 0.95rem; }
+
+    .download-btn {
+      display: inline-block;
+      background: #7c83ff;
+      color: #fff;
+      text-decoration: none;
+      padding: 0.5rem 1.25rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin: 0.5rem 0;
+      transition: background 0.2s;
+    }
+    .download-btn:hover { background: #6a71e0; }
   </style>
 </head>
 <body>
@@ -595,6 +650,9 @@ const HTML = `<!DOCTYPE html>
 
     function renderMarkdown(text) {
       let html = escapeHtml(text);
+      // Links → download buttons (before other replacements)
+      html = html.replace(/\\[([^\\]]+)\\]\\((\\/api\\/download\\/[^)]+)\\)/g, '<a class="download-btn" href="$2" download>$1</a>');
+      html = html.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
       // Headers
       html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
       html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
