@@ -159,7 +159,8 @@ const HTML = `<!DOCTYPE html>
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: #0f0f0f;
       color: #e0e0e0;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
     }
@@ -198,6 +199,7 @@ const HTML = `<!DOCTYPE html>
 
     main {
       flex: 1;
+      min-height: 0;
       max-width: 900px;
       width: 100%;
       margin: 0 auto;
@@ -205,6 +207,7 @@ const HTML = `<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       gap: 1.5rem;
+      overflow: hidden;
     }
 
     .suggestions {
@@ -232,10 +235,12 @@ const HTML = `<!DOCTYPE html>
 
     .messages {
       flex: 1;
+      min-height: 0;
       display: flex;
       flex-direction: column;
       gap: 1rem;
       overflow-y: auto;
+      scroll-behavior: smooth;
     }
 
     .message {
@@ -281,7 +286,34 @@ const HTML = `<!DOCTYPE html>
     .message .answer em { color: #bbb; font-style: italic; }
     .message .answer code { background: #0d0d1a; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #c8c8ff; }
     .message .answer ul { margin: 0.4rem 0; padding-left: 1.5rem; }
+    .message .answer ol { margin: 0.4rem 0; padding-left: 1.5rem; }
     .message .answer li { margin-bottom: 0.25rem; }
+    .message .answer hr { border: none; border-top: 1px solid #2a2a4a; margin: 0.75rem 0; }
+
+    .message .answer table.md-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      margin: 0.5rem 0;
+      display: table;
+    }
+    .message .answer .md-table th {
+      background: #1e1e3a;
+      color: #aab;
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 2px solid #3a3a5a;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .message .answer .md-table td {
+      padding: 0.4rem 0.75rem;
+      border-bottom: 1px solid #222;
+      white-space: nowrap;
+    }
+    .message .answer .md-table tr:nth-child(even) td { background: #151528; }
+    .message .answer .md-table tr:hover td { background: #1a1a3a; }
+    .message .answer .md-table-wrap { overflow-x: auto; margin: 0.5rem 0; }
 
     .message .toggle-details {
       background: none;
@@ -567,7 +599,7 @@ const HTML = `<!DOCTYPE html>
       loadingEl.className = 'loading';
       loadingEl.innerHTML = '<div class="spinner"></div><span class="loading-text">Analizando pregunta y consultando base de datos...</span>';
       messagesEl.appendChild(loadingEl);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollToBottom();
 
       try {
         const res = await fetch('/api/ask', {
@@ -633,8 +665,12 @@ const HTML = `<!DOCTYPE html>
 
       isLoading = false;
       sendBtn.disabled = false;
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollToBottom();
       inputEl.focus();
+    }
+
+    function scrollToBottom() {
+      requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
     }
 
     function toggleDetails(id) {
@@ -649,10 +685,39 @@ const HTML = `<!DOCTYPE html>
     }
 
     function renderMarkdown(text) {
-      let html = escapeHtml(text);
-      // Links → download buttons (before other replacements)
+      // Extract tables first, replace with placeholders
+      const tables = [];
+      const lines = text.split('\\n');
+      const processed = [];
+      let i = 0;
+
+      while (i < lines.length) {
+        if (lines[i].includes('|') && lines[i].trim().startsWith('|')) {
+          const tableLines = [];
+          while (i < lines.length && lines[i].includes('|') && lines[i].trim().startsWith('|')) {
+            tableLines.push(lines[i]);
+            i++;
+          }
+          if (tableLines.length >= 2) {
+            const placeholder = '%%TABLE_' + tables.length + '%%';
+            tables.push(renderTable(tableLines));
+            processed.push(placeholder);
+            continue;
+          }
+          tableLines.forEach(l => processed.push(l));
+          continue;
+        }
+        processed.push(lines[i]);
+        i++;
+      }
+
+      let html = escapeHtml(processed.join('\\n'));
+
+      // Links → download buttons
       html = html.replace(/\\[([^\\]]+)\\]\\((\\/api\\/download\\/[^)]+)\\)/g, '<a class="download-btn" href="$2" download>$1</a>');
       html = html.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+      // Horizontal rules
+      html = html.replace(/^---$/gm, '<hr>');
       // Headers
       html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
       html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
@@ -668,10 +733,38 @@ const HTML = `<!DOCTYPE html>
       html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, '<ul>$1</ul>');
       // Ordered lists
       html = html.replace(/^\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
-      // Line breaks (double newline = paragraph)
+      // Line breaks
       html = html.replace(/\\n\\n/g, '</p><p>');
       html = html.replace(/\\n/g, '<br>');
-      return '<p>' + html + '</p>';
+      html = '<p>' + html + '</p>';
+
+      // Restore tables
+      tables.forEach((tableHtml, idx) => {
+        html = html.replace('%%TABLE_' + idx + '%%', '</p>' + tableHtml + '<p>');
+      });
+      // Clean empty paragraphs
+      html = html.replace(/<p><\\/p>/g, '');
+
+      return html;
+    }
+
+    function renderTable(lines) {
+      const parseRow = (line) => line.split('|').slice(1, -1).map(c => c.trim());
+      const headers = parseRow(lines[0]);
+      const isSeparator = (line) => /^[\\s|:-]+$/.test(line.replace(/-/g, ''));
+      const dataStart = (lines.length > 1 && isSeparator(lines[1])) ? 2 : 1;
+      let html = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+      headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
+      html += '</tr></thead><tbody>';
+      for (let r = dataStart; r < lines.length; r++) {
+        const cells = parseRow(lines[r]);
+        if (cells.length === 0) continue;
+        html += '<tr>';
+        cells.forEach(c => { html += '<td>' + escapeHtml(c) + '</td>'; });
+        html += '</tr>';
+      }
+      html += '</tbody></table></div>';
+      return html;
     }
 
     inputEl.focus();
