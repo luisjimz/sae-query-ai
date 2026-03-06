@@ -1,12 +1,11 @@
 services:
   firebird:
-    image: jacobalberty/firebird:v4.0
+    image: jacobalberty/firebird:2.5-ss
     restart: unless-stopped
     environment:
-      FIREBIRD_USER: SYSDBA
-      FIREBIRD_PASSWORD: masterkey
+      ISC_PASSWORD: masterkey
     volumes:
-      - firebird-data:/firebird/data
+      - /root/firebird-data:/firebird/data
     ports:
       - "3050:3050"
 
@@ -23,6 +22,3 @@ services:
       FB_DATABASE: /firebird/data/SAE90EMPRE02.FDB
     depends_on:
       - firebird
-
-volumes:
-  firebird-data:
