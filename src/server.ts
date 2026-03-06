@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Hono } from "hono";
+import { basicAuth } from "hono/basic-auth";
 import { serve } from "@hono/node-server";
 import { testConnection } from "./db.js";
 import { runAgent } from "./agent.js";
@@ -8,6 +9,17 @@ import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.mjs";
 import crypto from "crypto";
 
 const app = new Hono();
+
+// --- Autenticación básica ---
+const AUTH_USER = process.env.AUTH_USER || "admin";
+const AUTH_PASS = process.env.AUTH_PASSWORD;
+
+if (AUTH_PASS) {
+  app.use("*", basicAuth({ username: AUTH_USER, password: AUTH_PASS }));
+  console.log(`Autenticación activada (usuario: ${AUTH_USER})`);
+} else {
+  console.warn("ADVERTENCIA: AUTH_PASSWORD no configurada. La app está sin protección.");
+}
 
 // --- Session store (in-memory) ---
 const MAX_HISTORY = 10; // últimos 10 intercambios por sesión
