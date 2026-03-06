@@ -1,0 +1,28 @@
+services:
+  firebird:
+    image: jacobalberty/firebird:v4.0
+    restart: unless-stopped
+    environment:
+      FIREBIRD_USER: SYSDBA
+      FIREBIRD_PASSWORD: masterkey
+    volumes:
+      - firebird-data:/firebird/data
+    ports:
+      - "3050:3050"
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      FB_HOST: firebird
+      FB_PORT: "3050"
+      FB_DATABASE: /firebird/data/SAE90EMPRE02.FDB
+    depends_on:
+      - firebird
+
+volumes:
+  firebird-data:

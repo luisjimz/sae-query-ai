@@ -1,10 +1,10 @@
 import "dotenv/config";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { query } from "./db.js";
 import { testConnection } from "./db.js";
-import { generateSQL, interpretResults } from "./ai.js";
-import type { ChatMessage } from "./ai.js";
+import { runAgent } from "./agent.js";
+import { isSafeQuery } from "./utils.js";
+import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.mjs";
 import crypto from "crypto";
 
 const app = new Hono();
@@ -13,7 +13,7 @@ const app = new Hono();
 const MAX_HISTORY = 10; // últimos 10 intercambios por sesión
 
 interface Session {
-  history: ChatMessage[];
+  history: MessageParam[];
   lastActive: number;
 }
 
@@ -39,32 +39,6 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-// --- Validación de seguridad ---
-const BLOCKED_KEYWORDS = [
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "DROP",
-  "ALTER",
-  "CREATE",
-  "TRUNCATE",
-  "EXECUTE",
-  "GRANT",
-  "REVOKE",
-  "MERGE",
-  "CALL",
-];
-
-function isSafeQuery(sql: string): boolean {
-  const upper = sql.toUpperCase().trim();
-  if (!upper.startsWith("SELECT")) return false;
-  for (const keyword of BLOCKED_KEYWORDS) {
-    const regex = new RegExp(`\\b${keyword}\\b`, "i");
-    if (regex.test(upper)) return false;
-  }
-  return true;
-}
-
 // --- API Routes ---
 
 app.get("/api/health", async (c) => {
@@ -83,66 +57,19 @@ app.post("/api/ask", async (c) => {
 
     const { id: sessionId, session } = getSession(reqSessionId);
 
-    // 1. Generar SQL con Claude (con historial de conversación)
-    const { sql, explanation } = await generateSQL(question, session.history);
+    // El agente maneja todo: generación SQL, ejecución, reintentos e interpretación
+    const { answer, sql, rowCount, results, toolCallCount } = await runAgent(
+      question,
+      session.history,
+      isSafeQuery
+    );
 
-    if (!sql) {
-      // Guardar en historial incluso si no generó SQL
-      session.history.push(
-        { role: "user", content: question },
-        { role: "assistant", content: `No se pudo generar SQL: ${explanation}` }
-      );
-      if (session.history.length > MAX_HISTORY * 2) {
-        session.history = session.history.slice(-MAX_HISTORY * 2);
-      }
+    console.log(`[ask] sessionId=${sessionId} toolCalls=${toolCallCount}`);
 
-      return c.json({
-        sessionId,
-        question,
-        sql: "",
-        rowCount: 0,
-        results: [],
-        answer: explanation,
-      });
-    }
-
-    // 2. Validar seguridad del SQL
-    if (!isSafeQuery(sql)) {
-      return c.json(
-        {
-          error:
-            "La query generada no es segura. Solo se permiten consultas SELECT.",
-          sql,
-        },
-        403
-      );
-    }
-
-    // 3. Ejecutar contra Firebird
-    let results: Record<string, unknown>[];
-    try {
-      results = await query(sql);
-    } catch (dbError) {
-      const dbMsg = dbError instanceof Error ? dbError.message : "Error de base de datos";
-      console.error("Error SQL:", sql, dbMsg);
-      return c.json({
-        sessionId,
-        question,
-        sql,
-        rowCount: 0,
-        results: [],
-        answer: `Error al ejecutar la consulta en la base de datos: ${dbMsg}\n\nSQL generado: ${sql}`,
-      });
-    }
-    const rowCount = results.length;
-
-    // 4. Interpretar resultados con Claude
-    const answer = await interpretResults(question, sql, results, rowCount);
-
-    // 5. Guardar en historial
+    // Guardar en historial (solo texto plano, no tool calls internos)
     session.history.push(
       { role: "user", content: question },
-      { role: "assistant", content: `SQL: ${sql}\nResultados: ${rowCount} filas.\nRespuesta: ${answer}` }
+      { role: "assistant", content: answer }
     );
     if (session.history.length > MAX_HISTORY * 2) {
       session.history = session.history.slice(-MAX_HISTORY * 2);
@@ -153,7 +80,7 @@ app.post("/api/ask", async (c) => {
       question,
       sql,
       rowCount,
-      results: results.slice(0, 20),
+      results,
       answer,
     });
   } catch (error) {
