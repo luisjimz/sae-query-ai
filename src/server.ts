@@ -2,11 +2,18 @@ import "dotenv/config";
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 import { serve } from "@hono/node-server";
+import { streamSSE } from "hono/streaming";
 import { testConnection } from "./db.js";
-import { runAgent } from "./agent.js";
+import { runAgentStream } from "./agent.js";
 import type { StoreFileFn } from "./agent.js";
 import { isSafeQuery } from "./utils.js";
-import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.mjs";
+import {
+  listSessions,
+  loadSession,
+  saveSession,
+  deleteSession,
+  createSession,
+} from "./sessions.js";
 import crypto from "crypto";
 
 // --- File store (in-memory) ---
@@ -47,35 +54,8 @@ if (AUTH_PASS) {
   console.warn("ADVERTENCIA: AUTH_PASSWORD no configurada. La app está sin protección.");
 }
 
-// --- Session store (in-memory) ---
-const MAX_HISTORY = 10; // últimos 10 intercambios por sesión
-
-interface Session {
-  history: MessageParam[];
-  lastActive: number;
-}
-
-const sessions = new Map<string, Session>();
-
-function getSession(sessionId?: string): { id: string; session: Session } {
-  if (sessionId && sessions.has(sessionId)) {
-    const session = sessions.get(sessionId)!;
-    session.lastActive = Date.now();
-    return { id: sessionId, session };
-  }
-  const id = crypto.randomUUID();
-  const session: Session = { history: [], lastActive: Date.now() };
-  sessions.set(id, session);
-  return { id, session };
-}
-
-// Limpiar sesiones inactivas cada 30 min
-setInterval(() => {
-  const cutoff = Date.now() - 30 * 60 * 1000;
-  for (const [id, s] of sessions) {
-    if (s.lastActive < cutoff) sessions.delete(id);
-  }
-}, 10 * 60 * 1000);
+// --- Session management (file-based) ---
+const MAX_HISTORY = 10; // últimos 10 intercambios enviados al agente como contexto
 
 // --- API Routes ---
 
@@ -85,50 +65,113 @@ app.get("/api/health", async (c) => {
 });
 
 app.post("/api/ask", async (c) => {
-  try {
-    const body = await c.req.json<{ question: string; sessionId?: string }>();
-    const { question, sessionId: reqSessionId } = body;
+  const body = await c.req.json<{ question: string; sessionId?: string }>();
+  const { question, sessionId: reqSessionId } = body;
 
-    if (!question || question.trim().length === 0) {
-      return c.json({ error: "La pregunta no puede estar vacía" }, 400);
-    }
-
-    const { id: sessionId, session } = getSession(reqSessionId);
-
-    // El agente maneja todo: generación SQL, ejecución, reintentos e interpretación
-    const { answer, sql, rowCount, results, toolCallCount } = await runAgent(
-      question,
-      session.history,
-      isSafeQuery,
-      storeFile
-    );
-
-    console.log(`[ask] sessionId=${sessionId} toolCalls=${toolCallCount}`);
-
-    // Guardar en historial (solo texto plano, no tool calls internos)
-    session.history.push(
-      { role: "user", content: question },
-      { role: "assistant", content: answer }
-    );
-    if (session.history.length > MAX_HISTORY * 2) {
-      session.history = session.history.slice(-MAX_HISTORY * 2);
-    }
-
-    return c.json({
-      sessionId,
-      question,
-      sql,
-      rowCount,
-      results,
-      answer,
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Error desconocido";
-    console.error("Error en /api/ask:", message);
-    return c.json({ error: message }, 500);
+  if (!question || question.trim().length === 0) {
+    return c.json({ error: "La pregunta no puede estar vacía" }, 400);
   }
+
+  // Load or create session
+  const sessionId = reqSessionId || crypto.randomUUID();
+  const session = (reqSessionId ? loadSession(reqSessionId) : null) ?? createSession(sessionId);
+
+  // Build agent history: only last MAX_HISTORY exchanges
+  const historySlice = session.history.slice(-MAX_HISTORY * 2);
+
+  return streamSSE(c, async (stream) => {
+    try {
+      await stream.writeSSE({
+        event: "session",
+        data: JSON.stringify({ sessionId }),
+      });
+
+      const result = await runAgentStream(
+        question,
+        historySlice,
+        isSafeQuery,
+        storeFile,
+        (event) => {
+          stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          }).catch(() => {});
+        }
+      );
+
+      console.log(`[ask] sessionId=${sessionId} toolCalls=${result.toolCallCount}`);
+
+      await stream.writeSSE({
+        event: "done",
+        data: JSON.stringify({
+          type: "done",
+          sql: result.sql,
+          rowCount: result.rowCount,
+          results: result.results,
+        }),
+      });
+
+      // Persist to session file
+      session.history.push(
+        { role: "user", content: question },
+        { role: "assistant", content: result.answer }
+      );
+      session.exchanges.push({
+        question,
+        answer: result.answer,
+        sql: result.sql,
+        rowCount: result.rowCount,
+        results: result.results.slice(0, 20),
+        timestamp: Date.now(),
+      });
+      if (session.title === "Nueva conversación") {
+        session.title = question.slice(0, 80);
+      }
+      session.lastActive = Date.now();
+      saveSession(session);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Error desconocido";
+      console.error("Error en /api/ask:", message);
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({ type: "error", message }),
+      }).catch(() => {});
+    }
+  });
 });
+
+// --- Session API ---
+
+app.get("/api/sessions", (c) => {
+  return c.json(listSessions());
+});
+
+app.get("/api/sessions/:id", (c) => {
+  const id = c.req.param("id");
+  const session = loadSession(id);
+  if (!session) {
+    return c.json({ error: "Sesión no encontrada" }, 404);
+  }
+  return c.json({
+    id: session.id,
+    title: session.title,
+    createdAt: session.createdAt,
+    lastActive: session.lastActive,
+    exchanges: session.exchanges,
+  });
+});
+
+app.delete("/api/sessions/:id", (c) => {
+  const id = c.req.param("id");
+  const deleted = deleteSession(id);
+  if (!deleted) {
+    return c.json({ error: "Sesión no encontrada" }, 404);
+  }
+  return c.json({ ok: true });
+});
+
+// --- File download ---
 
 app.get("/api/download/:id", (c) => {
   const id = c.req.param("id");
@@ -174,6 +217,18 @@ const HTML = `<!DOCTYPE html>
       gap: 1rem;
     }
 
+    .sidebar-toggle {
+      background: none;
+      border: 1px solid #333;
+      color: #aab;
+      font-size: 1.2rem;
+      cursor: pointer;
+      padding: 0.3rem 0.5rem;
+      border-radius: 6px;
+      line-height: 1;
+    }
+    .sidebar-toggle:hover { background: #2a2a4a; color: #e0e0e0; }
+
     header h1 {
       font-size: 1.4rem;
       color: #7c83ff;
@@ -197,9 +252,117 @@ const HTML = `<!DOCTYPE html>
     .status-dot.online { background: #4caf50; }
     .status-dot.offline { background: #f44336; }
 
+    .app-container {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* --- Sidebar --- */
+    .sidebar {
+      width: 280px;
+      background: #141425;
+      border-right: 1px solid #2a2a4a;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+      transition: margin-left 0.2s ease;
+    }
+    .sidebar.hidden {
+      margin-left: -280px;
+    }
+    .sidebar-header {
+      padding: 0.75rem;
+      border-bottom: 1px solid #2a2a4a;
+    }
+    .new-chat-btn {
+      width: 100%;
+      background: #7c83ff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.6rem 1rem;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: background 0.2s;
+    }
+    .new-chat-btn:hover { background: #6a71e0; }
+    .session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem 0;
+    }
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: all 0.15s;
+    }
+    .session-item:hover { background: #1a1a3a; }
+    .session-item.active {
+      background: #1e1e3a;
+      border-left-color: #7c83ff;
+    }
+    .session-item-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .session-item-title {
+      font-size: 0.85rem;
+      color: #ccc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .session-item.active .session-item-title { color: #fff; }
+    .session-item-date {
+      font-size: 0.7rem;
+      color: #666;
+      margin-top: 0.15rem;
+    }
+    .session-delete {
+      background: none;
+      border: none;
+      color: #666;
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      opacity: 0;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+    .session-item:hover .session-delete { opacity: 1; }
+    .session-delete:hover { background: #4a2a2a; color: #ff6b6b; }
+    .session-empty {
+      text-align: center;
+      color: #555;
+      font-size: 0.82rem;
+      padding: 2rem 1rem;
+    }
+
+    @media (max-width: 768px) {
+      .sidebar {
+        position: absolute;
+        z-index: 10;
+        height: calc(100vh - 56px);
+        top: 56px;
+        left: 0;
+      }
+      .sidebar.hidden { margin-left: -280px; }
+      header .subtitle { display: none; }
+    }
+
     main {
       flex: 1;
       min-height: 0;
+      min-width: 0;
       max-width: 900px;
       width: 100%;
       margin: 0 auto;
@@ -273,10 +436,7 @@ const HTML = `<!DOCTYPE html>
       margin-bottom: 0.5rem;
     }
 
-    .message .answer {
-      line-height: 1.6;
-    }
-
+    .message .answer { line-height: 1.6; }
     .message .answer p { margin-bottom: 0.5rem; }
     .message .answer p:last-child { margin-bottom: 0; }
     .message .answer h2 { font-size: 1.15rem; color: #7c83ff; margin: 0.75rem 0 0.4rem; }
@@ -324,7 +484,6 @@ const HTML = `<!DOCTYPE html>
       margin-top: 0.75rem;
       padding: 0;
     }
-
     .message .toggle-details:hover { text-decoration: underline; }
 
     .message .details {
@@ -333,7 +492,6 @@ const HTML = `<!DOCTYPE html>
       padding-top: 0.75rem;
       border-top: 1px solid #2a2a4a;
     }
-
     .message .details.show { display: block; }
 
     .message .details .sql-box {
@@ -363,7 +521,6 @@ const HTML = `<!DOCTYPE html>
       overflow-x: auto;
       display: block;
     }
-
     .results-table th {
       background: #1e1e3a;
       color: #aab;
@@ -374,7 +531,6 @@ const HTML = `<!DOCTYPE html>
       border-bottom: 1px solid #444;
       white-space: nowrap;
     }
-
     .results-table td {
       padding: 0.4rem 0.5rem;
       border-bottom: 1px solid #222;
@@ -383,19 +539,7 @@ const HTML = `<!DOCTYPE html>
       overflow: hidden;
       text-overflow: ellipsis;
     }
-
     .results-table tr:hover td { background: #1a1a2e; }
-
-    .loading {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 1.25rem;
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 12px;
-      animation: fadeIn 0.3s ease;
-    }
 
     .spinner {
       width: 20px;
@@ -405,13 +549,28 @@ const HTML = `<!DOCTYPE html>
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
-
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .loading-text {
+    .stream-status { margin-bottom: 0.75rem; }
+    .stream-status:empty { display: none; }
+    .stream-status-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.82rem;
       color: #888;
-      font-size: 0.9rem;
+      padding: 0.2rem 0;
     }
+    .stream-status-item .spinner { width: 14px; height: 14px; border-width: 2px; }
+
+    .status-icon {
+      font-weight: bold;
+      width: 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .status-icon.success { color: #4caf50; }
+    .status-icon.error { color: #f44336; }
 
     .input-area {
       position: sticky;
@@ -429,9 +588,7 @@ const HTML = `<!DOCTYPE html>
       padding: 0.5rem;
       transition: border-color 0.2s;
     }
-
     .input-wrapper:focus-within { border-color: #7c83ff; }
-
     .input-wrapper textarea {
       flex: 1;
       background: none;
@@ -445,7 +602,6 @@ const HTML = `<!DOCTYPE html>
       min-height: 24px;
       max-height: 120px;
     }
-
     .input-wrapper button {
       background: #7c83ff;
       color: #fff;
@@ -458,7 +614,6 @@ const HTML = `<!DOCTYPE html>
       transition: background 0.2s;
       align-self: flex-end;
     }
-
     .input-wrapper button:hover { background: #6a71e0; }
     .input-wrapper button:disabled { background: #444; cursor: not-allowed; }
 
@@ -481,7 +636,6 @@ const HTML = `<!DOCTYPE html>
       gap: 0.5rem;
       padding: 3rem 0;
     }
-
     .empty-state .icon { font-size: 3rem; opacity: 0.4; }
     .empty-state p { font-size: 0.95rem; }
 
@@ -502,53 +656,67 @@ const HTML = `<!DOCTYPE html>
 </head>
 <body>
   <header>
+    <button class="sidebar-toggle" onclick="toggleSidebar()" title="Historial">&#9776;</button>
     <h1>SAE Query AI</h1>
     <span class="subtitle">Consulta tu base de datos Aspel SAE con lenguaje natural</span>
     <div class="status-dot" id="statusDot" title="Verificando conexion..."></div>
   </header>
 
-  <main>
-    <div class="suggestions">
-      <button onclick="ask(this.textContent)">Productos con existencia baja</button>
-      <button onclick="ask(this.textContent)">Top 10 clientes por ventas</button>
-      <button onclick="ask(this.textContent)">Facturas del ultimo mes</button>
-      <button onclick="ask(this.textContent)">Productos mas vendidos</button>
-      <button onclick="ask(this.textContent)">Clientes con saldo pendiente</button>
-      <button onclick="ask(this.textContent)">Proveedores activos</button>
-    </div>
-
-    <div class="messages" id="messages">
-      <div class="empty-state" id="emptyState">
-        <div class="icon">&#128269;</div>
-        <p>Escribe una pregunta sobre tu base de datos SAE</p>
-        <p style="font-size:0.8rem">Ejemplo: "Cuantos productos tengo con existencia menor a 10?"</p>
+  <div class="app-container">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <button class="new-chat-btn" onclick="newChat()">+ Nueva conversacion</button>
       </div>
-    </div>
-
-    <div class="input-area">
-      <div class="input-wrapper">
-        <textarea
-          id="questionInput"
-          placeholder="Escribe tu pregunta aqui..."
-          rows="1"
-          onkeydown="handleKey(event)"
-          oninput="autoResize(this)"
-        ></textarea>
-        <button id="sendBtn" onclick="send()">Preguntar</button>
+      <div class="session-list" id="sessionList">
+        <div class="session-empty">Cargando historial...</div>
       </div>
-    </div>
-  </main>
+    </aside>
+
+    <main>
+      <div class="suggestions" id="suggestions">
+        <button onclick="ask(this.textContent)">Productos con existencia baja</button>
+        <button onclick="ask(this.textContent)">Top 10 clientes por ventas</button>
+        <button onclick="ask(this.textContent)">Facturas del ultimo mes</button>
+        <button onclick="ask(this.textContent)">Productos mas vendidos</button>
+        <button onclick="ask(this.textContent)">Clientes con saldo pendiente</button>
+        <button onclick="ask(this.textContent)">Proveedores activos</button>
+      </div>
+
+      <div class="messages" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="icon">&#128269;</div>
+          <p>Escribe una pregunta sobre tu base de datos SAE</p>
+          <p style="font-size:0.8rem">Ejemplo: "Cuantos productos tengo con existencia menor a 10?"</p>
+        </div>
+      </div>
+
+      <div class="input-area">
+        <div class="input-wrapper">
+          <textarea
+            id="questionInput"
+            placeholder="Escribe tu pregunta aqui..."
+            rows="1"
+            onkeydown="handleKey(event)"
+            oninput="autoResize(this)"
+          ></textarea>
+          <button id="sendBtn" onclick="send()">Preguntar</button>
+        </div>
+      </div>
+    </main>
+  </div>
 
   <script>
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('questionInput');
     const sendBtn = document.getElementById('sendBtn');
     const statusDot = document.getElementById('statusDot');
-    const emptyState = document.getElementById('emptyState');
+    const suggestionsEl = document.getElementById('suggestions');
+    const sessionListEl = document.getElementById('sessionList');
+    const sidebarEl = document.getElementById('sidebar');
     let isLoading = false;
-    let sessionId = null;
+    let sessionId = localStorage.getItem('sae_sessionId');
 
-    // Check health
+    // --- Init ---
     fetch('/api/health')
       .then(r => r.json())
       .then(d => {
@@ -560,6 +728,156 @@ const HTML = `<!DOCTYPE html>
         statusDot.title = 'No se pudo verificar la conexion';
       });
 
+    loadSessionList();
+    if (sessionId) {
+      loadSessionHistory(sessionId);
+    }
+
+    // --- Sidebar ---
+    function toggleSidebar() {
+      sidebarEl.classList.toggle('hidden');
+    }
+
+    async function loadSessionList() {
+      try {
+        const res = await fetch('/api/sessions');
+        const sessions = await res.json();
+        if (sessions.length === 0) {
+          sessionListEl.innerHTML = '<div class="session-empty">Sin conversaciones previas</div>';
+          return;
+        }
+        sessionListEl.innerHTML = '';
+        sessions.forEach(function(s) {
+          const el = document.createElement('div');
+          el.className = 'session-item' + (s.id === sessionId ? ' active' : '');
+          el.onclick = function(e) {
+            if (e.target.closest('.session-delete')) return;
+            selectSession(s.id);
+          };
+          const d = new Date(s.lastActive);
+          const dateStr = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })
+            + ' ' + d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+          el.innerHTML = '<div class="session-item-text">'
+            + '<div class="session-item-title">' + escapeHtml(s.title) + '</div>'
+            + '<div class="session-item-date">' + dateStr + ' &middot; ' + s.exchangeCount + ' msg</div>'
+            + '</div>'
+            + '<button class="session-delete" onclick="deleteSessionById(\\'' + s.id + '\\')" title="Eliminar">&times;</button>';
+          sessionListEl.appendChild(el);
+        });
+      } catch (e) {
+        sessionListEl.innerHTML = '<div class="session-empty">Error cargando historial</div>';
+      }
+    }
+
+    async function selectSession(id) {
+      if (isLoading) return;
+      sessionId = id;
+      localStorage.setItem('sae_sessionId', id);
+      await loadSessionHistory(id);
+      loadSessionList();
+      // Hide sidebar on mobile after selection
+      if (window.innerWidth <= 768) sidebarEl.classList.add('hidden');
+    }
+
+    async function loadSessionHistory(id) {
+      try {
+        const res = await fetch('/api/sessions/' + id);
+        if (!res.ok) {
+          sessionId = null;
+          localStorage.removeItem('sae_sessionId');
+          return;
+        }
+        const data = await res.json();
+        clearMessages();
+        data.exchanges.forEach(function(ex) {
+          appendExchange(ex.question, ex.answer, ex.sql, ex.rowCount, ex.results);
+        });
+        scrollToBottom();
+      } catch (e) {
+        sessionId = null;
+        localStorage.removeItem('sae_sessionId');
+      }
+    }
+
+    function newChat() {
+      sessionId = null;
+      localStorage.removeItem('sae_sessionId');
+      clearMessages();
+      loadSessionList();
+      inputEl.focus();
+      if (window.innerWidth <= 768) sidebarEl.classList.add('hidden');
+    }
+
+    async function deleteSessionById(id) {
+      if (!confirm('Eliminar esta conversacion?')) return;
+      await fetch('/api/sessions/' + id, { method: 'DELETE' });
+      if (id === sessionId) {
+        sessionId = null;
+        localStorage.removeItem('sae_sessionId');
+        clearMessages();
+      }
+      loadSessionList();
+    }
+
+    function clearMessages() {
+      messagesEl.innerHTML = '<div class="empty-state" id="emptyState">'
+        + '<div class="icon">&#128269;</div>'
+        + '<p>Escribe una pregunta sobre tu base de datos SAE</p>'
+        + '<p style="font-size:0.8rem">Ejemplo: "Cuantos productos tengo con existencia menor a 10?"</p>'
+        + '</div>';
+      suggestionsEl.style.display = 'flex';
+    }
+
+    function appendExchange(question, answer, sql, rowCount, results) {
+      const es = document.getElementById('emptyState');
+      if (es) es.remove();
+      suggestionsEl.style.display = 'none';
+
+      // User message
+      const userMsg = document.createElement('div');
+      userMsg.className = 'message user';
+      userMsg.innerHTML = '<div class="label">Tu pregunta</div><div class="answer">' + escapeHtml(question) + '</div>';
+      messagesEl.appendChild(userMsg);
+
+      // Assistant message
+      const msgEl = document.createElement('div');
+      msgEl.className = 'message';
+      msgEl.innerHTML = '<div class="label">Respuesta</div><div class="answer">' + renderMarkdown(answer) + '</div>';
+
+      if (sql) {
+        const detId = 'det-' + Math.random().toString(36).slice(2);
+        let detailsHtml = '<div class="details" id="' + detId + '">';
+        detailsHtml += '<div class="sql-box">' + escapeHtml(sql) + '</div>';
+        detailsHtml += '<div class="row-count">' + (rowCount || 0) + ' resultado(s)</div>';
+        if (results && results.length > 0) {
+          const keys = Object.keys(results[0]);
+          detailsHtml += '<table class="results-table"><thead><tr>';
+          keys.forEach(function(k) { detailsHtml += '<th>' + escapeHtml(k) + '</th>'; });
+          detailsHtml += '</tr></thead><tbody>';
+          results.forEach(function(row) {
+            detailsHtml += '<tr>';
+            keys.forEach(function(k) {
+              const val = row[k] == null ? '' : String(row[k]);
+              detailsHtml += '<td title="' + escapeHtml(val) + '">' + escapeHtml(val) + '</td>';
+            });
+            detailsHtml += '</tr>';
+          });
+          detailsHtml += '</tbody></table>';
+        }
+        detailsHtml += '</div>';
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'toggle-details';
+        toggleBtn.textContent = 'Ver detalles tecnicos';
+        toggleBtn.onclick = function() { toggleDetails(detId); };
+        msgEl.appendChild(toggleBtn);
+        msgEl.insertAdjacentHTML('beforeend', detailsHtml);
+      }
+
+      messagesEl.appendChild(msgEl);
+    }
+
+    // --- Input ---
     function handleKey(e) {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -586,7 +904,9 @@ const HTML = `<!DOCTYPE html>
       inputEl.value = '';
       inputEl.style.height = 'auto';
 
-      if (emptyState) emptyState.remove();
+      const es = document.getElementById('emptyState');
+      if (es) es.remove();
+      suggestionsEl.style.display = 'none';
 
       // User message
       const userMsg = document.createElement('div');
@@ -594,12 +914,56 @@ const HTML = `<!DOCTYPE html>
       userMsg.innerHTML = '<div class="label">Tu pregunta</div><div class="answer">' + escapeHtml(question) + '</div>';
       messagesEl.appendChild(userMsg);
 
-      // Loading
-      const loadingEl = document.createElement('div');
-      loadingEl.className = 'loading';
-      loadingEl.innerHTML = '<div class="spinner"></div><span class="loading-text">Analizando pregunta y consultando base de datos...</span>';
-      messagesEl.appendChild(loadingEl);
+      // Assistant message container
+      const msgEl = document.createElement('div');
+      msgEl.className = 'message';
+      msgEl.innerHTML = '<div class="label">Respuesta</div>';
+
+      const statusArea = document.createElement('div');
+      statusArea.className = 'stream-status';
+      msgEl.appendChild(statusArea);
+
+      const answerArea = document.createElement('div');
+      answerArea.className = 'answer';
+      msgEl.appendChild(answerArea);
+
+      messagesEl.appendChild(msgEl);
       scrollToBottom();
+
+      let accText = '';
+      let renderPending = false;
+      let metaData = null;
+
+      function scheduleRender() {
+        if (!renderPending) {
+          renderPending = true;
+          requestAnimationFrame(() => {
+            answerArea.innerHTML = renderMarkdown(accText);
+            renderPending = false;
+            scrollToBottom();
+          });
+        }
+      }
+
+      function completeSpinners() {
+        statusArea.querySelectorAll('.stream-status-item .spinner').forEach(function(s) {
+          const item = s.parentElement;
+          s.remove();
+          const icon = document.createElement('span');
+          icon.className = 'status-icon success';
+          icon.textContent = '\\u2713';
+          item.insertBefore(icon, item.firstChild);
+        });
+      }
+
+      function addStatus(text) {
+        completeSpinners();
+        const item = document.createElement('div');
+        item.className = 'stream-status-item';
+        item.innerHTML = '<div class="spinner"></div> ' + escapeHtml(text);
+        statusArea.appendChild(item);
+        scrollToBottom();
+      }
 
       try {
         const res = await fetch('/api/ask', {
@@ -608,59 +972,135 @@ const HTML = `<!DOCTYPE html>
           body: JSON.stringify({ question, sessionId }),
         });
 
-        const data = await res.json();
-        loadingEl.remove();
-
-        if (data.sessionId) sessionId = data.sessionId;
-
-        if (data.error) {
-          const errEl = document.createElement('div');
-          errEl.className = 'error-msg';
-          errEl.textContent = 'Error: ' + data.error;
-          messagesEl.appendChild(errEl);
-        } else {
-          const msgEl = document.createElement('div');
-          msgEl.className = 'message';
-
-          let detailsHtml = '';
-          if (data.sql) {
-            detailsHtml = '<div class="details" id="det-' + Date.now() + '">';
-            detailsHtml += '<div class="sql-box">' + escapeHtml(data.sql) + '</div>';
-            detailsHtml += '<div class="row-count">' + data.rowCount + ' resultado(s)</div>';
-
-            if (data.results && data.results.length > 0) {
-              const keys = Object.keys(data.results[0]);
-              detailsHtml += '<table class="results-table"><thead><tr>';
-              keys.forEach(k => { detailsHtml += '<th>' + escapeHtml(k) + '</th>'; });
-              detailsHtml += '</tr></thead><tbody>';
-              data.results.forEach(row => {
-                detailsHtml += '<tr>';
-                keys.forEach(k => {
-                  const val = row[k] == null ? '' : String(row[k]);
-                  detailsHtml += '<td title="' + escapeHtml(val) + '">' + escapeHtml(val) + '</td>';
-                });
-                detailsHtml += '</tr>';
-              });
-              detailsHtml += '</tbody></table>';
-            }
-            detailsHtml += '</div>';
-          }
-
-          const detId = 'det-' + Date.now();
-          msgEl.innerHTML =
-            '<div class="label">Respuesta</div>' +
-            '<div class="answer">' + renderMarkdown(data.answer) + '</div>' +
-            (data.sql ? '<button class="toggle-details" onclick="toggleDetails(\\'' + detId + '\\')">Ver detalles tecnicos</button>' : '') +
-            detailsHtml.replace(/id="det-\\d+"/, 'id="' + detId + '"');
-
-          messagesEl.appendChild(msgEl);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Error del servidor');
         }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\\n\\n');
+          buffer = parts.pop() || '';
+
+          for (let pi = 0; pi < parts.length; pi++) {
+            const part = parts[pi];
+            if (!part.trim()) continue;
+            const lines = part.split('\\n');
+            let eventType = '';
+            let eventData = '';
+            for (let li = 0; li < lines.length; li++) {
+              if (lines[li].startsWith('event: ')) eventType = lines[li].slice(7);
+              else if (lines[li].startsWith('data: ')) eventData += lines[li].slice(6);
+            }
+
+            if (!eventType || !eventData) continue;
+            let data;
+            try { data = JSON.parse(eventData); } catch(e) { continue; }
+
+            switch (eventType) {
+              case 'session':
+                if (data.sessionId) {
+                  sessionId = data.sessionId;
+                  localStorage.setItem('sae_sessionId', sessionId);
+                }
+                break;
+              case 'status':
+                addStatus(data.message);
+                break;
+              case 'tool_call': {
+                const toolLabel = data.tool === 'query_database' ? 'Consultando base de datos...'
+                  : data.tool === 'generate_file' ? 'Generando archivo...'
+                  : 'Verificando conexion...';
+                addStatus(toolLabel);
+                break;
+              }
+              case 'tool_result': {
+                const items = statusArea.querySelectorAll('.stream-status-item');
+                const lastItem = items[items.length - 1];
+                if (lastItem) {
+                  const icon = data.success ? '\\u2713' : '\\u2717';
+                  const cls = data.success ? 'success' : 'error';
+                  lastItem.innerHTML = '<span class="status-icon ' + cls + '">' + icon + '</span> ' + escapeHtml(data.summary);
+                }
+                scrollToBottom();
+                break;
+              }
+              case 'delta':
+                if (!accText) completeSpinners();
+                accText += data.text;
+                scheduleRender();
+                break;
+              case 'done':
+                metaData = data;
+                completeSpinners();
+                break;
+              case 'error': {
+                completeSpinners();
+                const errEl = document.createElement('div');
+                errEl.className = 'error-msg';
+                errEl.textContent = 'Error: ' + (data.message || 'Error desconocido');
+                msgEl.appendChild(errEl);
+                scrollToBottom();
+                break;
+              }
+            }
+          }
+        }
+
+        // Final render
+        if (accText) {
+          answerArea.innerHTML = renderMarkdown(accText);
+        }
+
+        // Add details toggle
+        if (metaData && metaData.sql) {
+          const detId = 'det-' + Date.now();
+          let detailsHtml = '<div class="details" id="' + detId + '">';
+          detailsHtml += '<div class="sql-box">' + escapeHtml(metaData.sql) + '</div>';
+          detailsHtml += '<div class="row-count">' + metaData.rowCount + ' resultado(s)</div>';
+
+          if (metaData.results && metaData.results.length > 0) {
+            const keys = Object.keys(metaData.results[0]);
+            detailsHtml += '<table class="results-table"><thead><tr>';
+            keys.forEach(function(k) { detailsHtml += '<th>' + escapeHtml(k) + '</th>'; });
+            detailsHtml += '</tr></thead><tbody>';
+            metaData.results.forEach(function(row) {
+              detailsHtml += '<tr>';
+              keys.forEach(function(k) {
+                const val = row[k] == null ? '' : String(row[k]);
+                detailsHtml += '<td title="' + escapeHtml(val) + '">' + escapeHtml(val) + '</td>';
+              });
+              detailsHtml += '</tr>';
+            });
+            detailsHtml += '</tbody></table>';
+          }
+          detailsHtml += '</div>';
+
+          const toggleBtn = document.createElement('button');
+          toggleBtn.className = 'toggle-details';
+          toggleBtn.textContent = 'Ver detalles tecnicos';
+          toggleBtn.onclick = function() { toggleDetails(detId); };
+          msgEl.appendChild(toggleBtn);
+          msgEl.insertAdjacentHTML('beforeend', detailsHtml);
+        }
+
+        // Refresh sidebar to show new/updated session
+        loadSessionList();
+
       } catch (err) {
-        loadingEl.remove();
+        statusArea.innerHTML = '';
+        answerArea.innerHTML = '';
         const errEl = document.createElement('div');
         errEl.className = 'error-msg';
         errEl.textContent = 'Error de conexion: ' + err.message;
-        messagesEl.appendChild(errEl);
+        msgEl.appendChild(errEl);
       }
 
       isLoading = false;
@@ -669,6 +1109,7 @@ const HTML = `<!DOCTYPE html>
       inputEl.focus();
     }
 
+    // --- Utilities ---
     function scrollToBottom() {
       requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
     }
@@ -685,7 +1126,6 @@ const HTML = `<!DOCTYPE html>
     }
 
     function renderMarkdown(text) {
-      // Extract tables first, replace with placeholders
       const tables = [];
       const lines = text.split('\\n');
       const processed = [];
@@ -712,40 +1152,34 @@ const HTML = `<!DOCTYPE html>
       }
 
       let html = escapeHtml(processed.join('\\n'));
-
-      // Links → download buttons
       html = html.replace(/\\[([^\\]]+)\\]\\((\\/api\\/download\\/[^)]+)\\)/g, '<a class="download-btn" href="$2" download>$1</a>');
       html = html.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-      // Horizontal rules
       html = html.replace(/^---$/gm, '<hr>');
-      // Headers
       html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
       html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
       html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-      // Bold
       html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-      // Italic
       html = html.replace(/(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)/g, '<em>$1</em>');
-      // Inline code
       html = html.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-      // Unordered lists
       html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
       html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, '<ul>$1</ul>');
-      // Ordered lists
       html = html.replace(/^\\d+\\.\\s+(.+)$/gm, '<li>$1</li>');
-      // Line breaks
       html = html.replace(/\\n\\n/g, '</p><p>');
       html = html.replace(/\\n/g, '<br>');
       html = '<p>' + html + '</p>';
-
-      // Restore tables
       tables.forEach((tableHtml, idx) => {
         html = html.replace('%%TABLE_' + idx + '%%', '</p>' + tableHtml + '<p>');
       });
-      // Clean empty paragraphs
       html = html.replace(/<p><\\/p>/g, '');
-
       return html;
+    }
+
+    function inlineMarkdown(text) {
+      let h = escapeHtml(text);
+      h = h.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+      h = h.replace(/(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)/g, '<em>$1</em>');
+      h = h.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+      return h;
     }
 
     function renderTable(lines) {
@@ -754,13 +1188,13 @@ const HTML = `<!DOCTYPE html>
       const isSeparator = (line) => /^[\\s|:-]+$/.test(line.replace(/-/g, ''));
       const dataStart = (lines.length > 1 && isSeparator(lines[1])) ? 2 : 1;
       let html = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
-      headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
+      headers.forEach(h => { html += '<th>' + inlineMarkdown(h) + '</th>'; });
       html += '</tr></thead><tbody>';
       for (let r = dataStart; r < lines.length; r++) {
         const cells = parseRow(lines[r]);
         if (cells.length === 0) continue;
         html += '<tr>';
-        cells.forEach(c => { html += '<td>' + escapeHtml(c) + '</td>'; });
+        cells.forEach(c => { html += '<td>' + inlineMarkdown(c) + '</td>'; });
         html += '</tr>';
       }
       html += '</tbody></table></div>';
@@ -778,7 +1212,7 @@ app.get("/", (c) => {
 
 // --- Start server ---
 
-const port = Number(process.env.PORT) || 3000;
+const port = Number(process.env.PORT) || 3005;
 
 console.log(`SAE Query AI iniciando en http://localhost:${port}`);
 

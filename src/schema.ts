@@ -165,10 +165,88 @@ Todos los tipos verificados directo de la BD real.
 
 ---
 
+### FACTC02 — Cobros / Pagos recibidos (Cuentas por Cobrar)
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| TIP_DOC | VARCHAR(1) | Tipo de documento de cobro |
+| CVE_DOC | VARCHAR(20) | Clave del documento de cobro (PK) |
+| CVE_CLPV | VARCHAR(10) | Clave del cliente (FK a CLIE02.CLAVE) |
+| STATUS | VARCHAR(1) | Estatus (E=Elaborado, C=Cancelado) |
+| FECHA_DOC | TIMESTAMP | Fecha del cobro |
+| IMPORTE | DOUBLE | Importe del cobro |
+| FOR_PAG | VARCHAR(5) | Forma de pago (01=Efectivo, 02=Cheque, 03=Transferencia, 04=Tarjeta crédito, 28=Tarjeta débito, 99=Por definir) |
+| NUM_MONED | INTEGER | Número de moneda |
+| TIPCAMB | DOUBLE | Tipo de cambio |
+| CVE_BCOS | VARCHAR(5) | Clave del banco |
+| NUM_CTAPAG | VARCHAR(20) | Número de cuenta de pago |
+| REFER | VARCHAR(20) | Referencia del pago |
+| CVE_OBS | VARCHAR(5) | Clave de observación |
+| UUID | VARCHAR(50) | UUID del CFDI de pago |
+| CVE_DOCAPL | VARCHAR(20) | Clave del documento aplicado (factura a la que se aplica) |
+| IMPORTE_APL | DOUBLE | Importe aplicado al documento |
+
+**Nota:** Para saber cómo se pagó una factura, unir FACTC02 con FACTF02 usando TRIM(FACTC02.CVE_DOCAPL) = TRIM(FACTF02.CVE_DOC). El campo FOR_PAG en FACTC02 indica la forma de pago real utilizada.
+
+---
+
+### COND_PAG02 — Catálogo de Condiciones de Pago
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CLAVE | VARCHAR(5) | Clave de condición (PK) |
+| DESCRIPCION | VARCHAR(50) | Descripción (ej: "Contado", "Crédito 30 días", "Crédito 60 días") |
+| DIASCRED | INTEGER | Días de crédito que otorga esta condición |
+
+---
+
+### CUEN_M02 — Cuentas por Cobrar: Cargos (movimientos principales)
+Esta es la tabla PRINCIPAL para saber el saldo real de una factura. Cada factura genera un cargo aquí.
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CVE_CLIE | VARCHAR(10) | Clave del cliente (FK a CLIE02.CLAVE) |
+| REFER | VARCHAR(20) | Referencia = clave del documento (normalmente = CVE_DOC de FACTF02) |
+| NO_FACTURA | VARCHAR(20) | Número de factura (normalmente igual a REFER) |
+| DOCTO | VARCHAR(20) | Documento asociado |
+| TIPO_MOV | VARCHAR(1) | Tipo de movimiento: 'C' = Cargo (factura), 'A' = Abono (raro aquí) |
+| SIGNO | INTEGER | +1 para cargos, -1 para abonos |
+| IMPORTE | DOUBLE | Monto del cargo |
+| FECHA_APLI | TIMESTAMP | Fecha de aplicación |
+| FECHA_VENC | TIMESTAMP | Fecha de vencimiento |
+| STRCVEVEND | VARCHAR(5) | Clave del vendedor |
+| NUM_MONED | INTEGER | Número de moneda |
+| TCAMBIO | DOUBLE | Tipo de cambio |
+| STATUS | VARCHAR(1) | Estatus del movimiento (A=Activo) |
+| NUM_CPTO | INTEGER | Número de concepto |
+| NUM_CARGO | INTEGER | Número de cargo |
+
+---
+
+### CUEN_DET02 — Cuentas por Cobrar: Abonos/Pagos (detalle de pagos aplicados)
+Aquí se registran TODOS los pagos. Es la tabla clave para saber cuánto se ha pagado de cada factura.
+| Campo | Tipo real | Descripción |
+|-------|-----------|-------------|
+| CVE_CLIE | VARCHAR(10) | Clave del cliente (FK a CLIE02.CLAVE) |
+| REFER | VARCHAR(20) | Referencia = clave de la factura a la que se aplica el pago |
+| NO_FACTURA | VARCHAR(20) | Número de factura pagada |
+| ID_MOV | INTEGER | ID del movimiento |
+| TIPO_MOV | VARCHAR(1) | Tipo: 'A' = Abono (pago), 'C' = Cargo (raro aquí) |
+| SIGNO | INTEGER | -1 para abonos (pagos), +1 para cargos |
+| IMPORTE | DOUBLE | Monto del pago/abono |
+| FECHA_APLI | TIMESTAMP | Fecha en que se aplicó el pago |
+| FECHA_VENC | TIMESTAMP | Fecha de vencimiento |
+| STRCVEVEND | VARCHAR(5) | Clave del vendedor |
+| NUM_MONED | INTEGER | Número de moneda |
+| TCAMBIO | DOUBLE | Tipo de cambio |
+| NO_PARTIDA | INTEGER | Número de partida del pago |
+| CVE_FOLIO | VARCHAR(10) | Folio del documento de pago |
+| NUMCTAPAGO_ORIGEN | VARCHAR(20) | Cuenta de pago origen |
+| NUMCHEQUE | VARCHAR(20) | Número de cheque (si aplica) |
+
+---
+
 ### Otras tablas disponibles
 - **MINVE02** — Movimientos de inventario (campos: CVE_ART, TIPO_MOV, FECHA, CANTIDAD, COSTO, NUM_ALM, CVE_DOC, CONCEPTO)
 - **ALMACENES02** — Catálogo de almacenes (campos: CVE_ALM, DESCR, STATUS)
-- **VEND02** — Catálogo de vendedores (campos: CLAVE, NOMBRE, STATUS, COM_VEN)
+- **VEND02** — Catálogo de vendedores (campos: CVE_VEND, NOMBRE, STATUS, COMI, CLASIFIC)
 - **ZONA02** — Catálogo de zonas (campos: CLAVE, DESCRIPCION)
 - **MONED02** — Catálogo de monedas (campos: NUM_MONED, DESCRIPCION, TIPCAMB)
 - **IMPU02** — Catálogo de impuestos (campos: CVE_ESQIMPU, DESCRIPCION, PORCENTAJE)
@@ -176,16 +254,59 @@ Todos los tipos verificados directo de la BD real.
 - **PRVPROD02** — Relación producto-proveedor (campos: CVE_ART, CVE_PROV, COSTO, TIEMPO_ENT)
 - **COMPR02** — Compras (estructura similar a FACTF02: TIP_DOC, CVE_DOC, CVE_CLPV→proveedor, STATUS, FECHA_DOC, IMPORTE, etc.)
 - **PAR_COMPR02** — Partidas de compras (estructura similar a PAR_FACTF02)
+- **FACTC02** — Cobros formales (solo 24 registros, casi no se usa. Los pagos reales están en CUEN_DET02)
+- **DOCTOSIGF02** — Enlaces entre documentos (CVE_DOC → CVE_DOC_E, con TIP_DOC_E para tipo)
 
 ---
 
 ### Relaciones principales
 - FACTF02.CVE_CLPV → CLIE02.CLAVE (factura pertenece a un cliente)
-- FACTF02.CVE_VEND → VEND02.CLAVE (factura asignada a un vendedor)
+- FACTF02.CVE_VEND → VEND02.CLAVE (factura asignada a un vendedor). Nota: el campo en VEND02 es CVE_VEND, no CLAVE.
 - PAR_FACTF02.CVE_DOC → FACTF02.CVE_DOC (partidas de una factura)
 - PAR_FACTF02.CVE_ART → INVE02.CVE_ART (artículo en la partida)
+- CUEN_M02.REFER → FACTF02.CVE_DOC (cargo CxC generado por una factura)
+- CUEN_M02.CVE_CLIE → CLIE02.CLAVE (cargo pertenece a un cliente)
+- CUEN_DET02.REFER → CUEN_M02.REFER (pago aplicado a un cargo, usando misma REFER + CVE_CLIE)
+- CUEN_DET02.CVE_CLIE → CLIE02.CLAVE (pago pertenece a un cliente)
 - COMPR02.CVE_CLPV → PROV02.CLAVE (compra pertenece a un proveedor)
 - PAR_COMPR02.CVE_ART → INVE02.CVE_ART (artículo en la partida de compra)
+
+### CRÍTICO: Flujo real de facturación y pagos
+El STATUS de FACTF02 **NUNCA cambia cuando se paga una factura**. Siempre queda 'E' (Elaborado).
+Solo cambia a 'C' cuando se cancela el CFDI. Por lo tanto, **NO se puede usar FACTF02.STATUS para saber si una factura está pagada**.
+
+**Flujo:**
+1. Se crea factura en FACTF02 → se genera un CARGO (TIPO_MOV='C', SIGNO=+1) en CUEN_M02
+2. Cuando se recibe pago (total o parcial) → se genera un ABONO (TIPO_MOV='A', SIGNO=-1) en CUEN_DET02
+3. Saldo real de una factura = CUEN_M02.IMPORTE - SUM(CUEN_DET02.IMPORTE) donde TRIM(REFER) coincide
+4. Si saldo = 0 → Pagada. Si saldo > 0 → Pendiente o parcialmente pagada.
+
+**ADVERTENCIA:** La tabla FACTC02 casi NO se usa (tiene ~24 registros vs ~68,000 pagos en CUEN_DET02). NUNCA usar FACTC02 como fuente principal de pagos.
+
+### Guía para análisis de cartera y cobros
+
+**Cartera vencida (aging) — FORMA CORRECTA:**
+Cruzar CUEN_M02 (cargos) con CUEN_DET02 (abonos) para obtener el saldo real pendiente de cada factura.
+Solo incluir facturas con saldo > 0 y fecha de vencimiento pasada.
+Ejemplo de query para saldo por factura:
+\`\`\`sql
+SELECT m.REFER, m.IMPORTE AS CARGO, COALESCE(SUM(d.IMPORTE), 0) AS ABONADO,
+       (m.IMPORTE - COALESCE(SUM(d.IMPORTE), 0)) AS SALDO
+FROM CUEN_M02 m
+LEFT JOIN CUEN_DET02 d ON TRIM(m.REFER) = TRIM(d.REFER)
+  AND TRIM(m.CVE_CLIE) = TRIM(d.CVE_CLIE) AND d.TIPO_MOV = 'A'
+WHERE m.TIPO_MOV = 'C' AND m.FECHA_VENC < CURRENT_TIMESTAMP
+GROUP BY m.REFER, m.IMPORTE, m.CVE_CLIE
+HAVING (m.IMPORTE - COALESCE(SUM(d.IMPORTE), 0)) > 0
+\`\`\`
+
+**Antigüedad de cartera (aging por buckets):**
+Usar la query anterior como base y agrupar por \`DATEDIFF(DAY, m.FECHA_VENC, CURRENT_TIMESTAMP)\` en rangos: 1-30, 31-60, 61-90, 90+ días.
+
+**Filtrar por vendedor:** Usar \`TRIM(m.STRCVEVEND) = 'XX'\` en CUEN_M02 (el campo es STRCVEVEND, no CVE_VEND).
+
+- **Desglose contado vs crédito:** Usar FACTF02.CONTADO = 'S' para contado, 'N' para crédito.
+- **Clientes con mala práctica crediticia:** Buscar clientes con saldo pendiente > 0 en CUEN_M02/CUEN_DET02 con facturas vencidas 60+ días que tengan ventas nuevas recientes en FACTF02.
 
 ---
 

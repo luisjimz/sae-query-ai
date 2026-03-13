@@ -7,7 +7,7 @@ import { generatePDF, generateExcel, generateDocx } from "./files.js";
 const client = new Anthropic();
 
 const MODEL = () => process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-const MAX_TOOL_ITERATIONS = 7;
+const MAX_TOOL_ITERATIONS = 15;
 
 export type StoreFileFn = (entry: {
   buffer: Buffer;
@@ -29,6 +29,17 @@ ${SAE_SCHEMA}
 - Si no puedes consultar la base de datos por alguna razón, dilo explícitamente. NUNCA rellenes con datos aproximados o estimados.
 - Cada cifra, nombre, fecha y monto en tu respuesta DEBE provenir directamente del resultado de \`query_database\` en este mismo turno.
 
+## ESTRATEGIA DE DESCOMPOSICIÓN — PREGUNTAS COMPLEJAS:
+Antes de escribir cualquier SQL, analiza la pregunta del usuario y planifica tu enfoque:
+
+1. **Planifica primero.** Si la pregunta tiene múltiples partes o requiere diferentes tipos de análisis, identifica cuántas consultas necesitas y qué responde cada una. Piensa esto ANTES de generar SQL.
+2. **Una consulta por llamada.** Ejecuta cada consulta en una llamada separada a \`query_database\`. NUNCA intentes combinar análisis independientes en una sola query gigante con múltiples JOINs y subconsultas anidadas — esto produce errores y resultados incorrectos.
+3. **Construye la respuesta incrementalmente.** Ejecuta tus consultas una por una, y al final sintetiza todos los resultados en una respuesta clara y unificada para el usuario.
+4. **Ejemplos de descomposición:**
+   - "¿Cuál es el saldo por cobrar del cliente X y qué productos le vendimos más?" → Query 1: saldo y datos del cliente. Query 2: productos más vendidos al cliente.
+   - "Dame el aging de cartera y los clientes con mala práctica crediticia" → Query 1: resumen de antigüedad de saldos. Query 2: clientes con facturas vencidas 60+ días que siguen comprando.
+   - "Ventas por vendedor y por zona este mes" → Query 1: ventas por vendedor. Query 2: ventas por zona.
+
 ## Instrucciones de comportamiento:
 1. Usa la herramienta \`query_database\` para ejecutar consultas SELECT contra la base de datos Firebird.
 2. Usa SOLO queries SELECT. La herramienta rechazará cualquier otra operación.
@@ -45,6 +56,7 @@ ${SAE_SCHEMA}
 8. Si los datos incluyen montos, formatea los números con separadores de miles y dos decimales.
 9. Si hay fechas, preséntalas en formato legible (ej: "15 de enero de 2024").
 10. Si no puedes obtener los datos por una razón válida, explícalo claramente en español.
+11. Para preguntas sobre formas de pago, condiciones de crédito, o antigüedad de cartera: usa las tablas FACTC02 (cobros) y COND_PAG02 (condiciones de pago) además de FACTF02. El campo FACTF02.CONTADO indica si es venta de contado, y FACTF02.FORMADEPAGOSAT indica la forma de pago SAT.
 
 ## Generación de archivos:
 Cuando el usuario pida un reporte, exportación, o archivo descargable (Excel, PDF, Word/DOCX):
@@ -261,6 +273,16 @@ export interface AgentResult {
   toolCallCount: number;
 }
 
+// --- Stream Events ---
+
+export type StreamEvent =
+  | { type: 'status'; message: string }
+  | { type: 'tool_call'; tool: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool: string; success: boolean; summary: string }
+  | { type: 'delta'; text: string }
+  | { type: 'done'; sql: string; rowCount: number; results: Record<string, unknown>[] }
+  | { type: 'error'; message: string };
+
 // --- Agentic Loop ---
 
 export async function runAgent(
@@ -362,6 +384,155 @@ export async function runAgent(
     answer:
       "El agente no pudo completar la tarea dentro del número máximo de pasos. " +
       "Por favor reformula tu pregunta.",
+    sql: lastSql,
+    rowCount: lastRowCount,
+    results: lastResults.slice(0, 20),
+    toolCallCount: iterationCount,
+  };
+}
+
+// --- Streaming Agentic Loop ---
+
+export async function runAgentStream(
+  question: string,
+  history: MessageParam[],
+  isSafeQueryFn: (sql: string) => boolean,
+  storeFile: StoreFileFn,
+  emit: (event: StreamEvent) => void
+): Promise<AgentResult> {
+  const messages: MessageParam[] = [
+    ...history,
+    { role: "user", content: question },
+  ];
+
+  let iterationCount = 0;
+  let lastSql = "";
+  let lastRowCount = 0;
+  let lastResults: Record<string, unknown>[] = [];
+  let answerText = "";
+
+  while (iterationCount < MAX_TOOL_ITERATIONS) {
+    iterationCount++;
+
+    emit({
+      type: 'status',
+      message: iterationCount === 1 ? 'Analizando tu pregunta...' : 'Analizando resultados...',
+    });
+
+    const stream = client.messages.stream({
+      model: MODEL(),
+      max_tokens: 4096,
+      system: AGENT_SYSTEM_PROMPT,
+      tools: TOOLS,
+      messages,
+    });
+
+    // Stream text deltas to client in real-time
+    answerText = "";
+    stream.on('text', (text) => {
+      answerText += text;
+      emit({ type: 'delta', text });
+    });
+
+    const response = await stream.finalMessage();
+
+    console.log(
+      `[agent] Iteración ${iterationCount} | stop_reason: ${response.stop_reason} | ` +
+        `input_tokens: ${response.usage.input_tokens} | output_tokens: ${response.usage.output_tokens}`
+    );
+
+    // Model finished with a text response
+    if (response.stop_reason === "end_turn") {
+      if (!answerText) {
+        const textBlock = response.content.find((b) => b.type === "text");
+        answerText = textBlock && "text" in textBlock ? textBlock.text : "No se pudo generar una respuesta.";
+      }
+      return {
+        answer: answerText,
+        sql: lastSql,
+        rowCount: lastRowCount,
+        results: lastResults.slice(0, 20),
+        toolCallCount: iterationCount,
+      };
+    }
+
+    // Model wants to use tools
+    if (response.stop_reason === "tool_use") {
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolUseBlocks = response.content.filter(
+        (b): b is ToolUseBlock => b.type === "tool_use"
+      );
+
+      const toolResults: ToolResultBlockParam[] = [];
+
+      for (const toolUse of toolUseBlocks) {
+        console.log(`[agent] Ejecutando tool: ${toolUse.name}`, toolUse.input);
+
+        emit({
+          type: 'tool_call',
+          tool: toolUse.name,
+          input: toolUse.input as Record<string, unknown>,
+        });
+
+        const resultStr = await executeToolCall(
+          toolUse.name,
+          toolUse.input as Record<string, unknown>,
+          isSafeQueryFn,
+          storeFile
+        );
+
+        // Track last successful DB query and emit result
+        if (toolUse.name === "query_database") {
+          try {
+            const parsed = JSON.parse(resultStr);
+            if (parsed.ok) {
+              lastSql = (toolUse.input as { sql: string }).sql;
+              lastRowCount = parsed.rowCount;
+              lastResults = parsed.results;
+              emit({ type: 'tool_result', tool: toolUse.name, success: true, summary: `${parsed.rowCount} resultado(s) obtenidos` });
+            } else {
+              emit({ type: 'tool_result', tool: toolUse.name, success: false, summary: parsed.error || 'Error en la consulta' });
+            }
+          } catch {
+            emit({ type: 'tool_result', tool: toolUse.name, success: false, summary: 'Error procesando resultado' });
+          }
+        } else if (toolUse.name === "generate_file") {
+          try {
+            const parsed = JSON.parse(resultStr);
+            emit({ type: 'tool_result', tool: toolUse.name, success: !!parsed.ok, summary: parsed.mensaje || parsed.error || 'Completado' });
+          } catch {
+            emit({ type: 'tool_result', tool: toolUse.name, success: false, summary: 'Error generando archivo' });
+          }
+        } else {
+          try {
+            const parsed = JSON.parse(resultStr);
+            emit({ type: 'tool_result', tool: toolUse.name, success: parsed.ok !== false, summary: parsed.ok ? 'Conexión exitosa' : (parsed.error || 'Error') });
+          } catch {
+            emit({ type: 'tool_result', tool: toolUse.name, success: true, summary: 'Completado' });
+          }
+        }
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: resultStr,
+        });
+      }
+
+      messages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    // Unexpected stop reason
+    break;
+  }
+
+  // Iteration cap reached or unexpected stop
+  const fallbackAnswer = answerText ||
+    "El agente no pudo completar la tarea dentro del número máximo de pasos. Por favor reformula tu pregunta.";
+  return {
+    answer: fallbackAnswer,
     sql: lastSql,
     rowCount: lastRowCount,
     results: lastResults.slice(0, 20),
