@@ -9,6 +9,24 @@ const client = new Anthropic();
 const MODEL = () => process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 const MAX_TOOL_ITERATIONS = 15;
 
+// --- Logging ---
+
+function timestamp(): string {
+  return new Date().toISOString().replace("T", " ").slice(0, 23);
+}
+
+function log(tag: string, msg: string, data?: Record<string, unknown>) {
+  const prefix = `${timestamp()} [${tag}]`;
+  if (data) {
+    const compact = Object.entries(data)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" | ");
+    console.log(`${prefix} ${msg} — ${compact}`);
+  } else {
+    console.log(`${prefix} ${msg}`);
+  }
+}
+
 export type StoreFileFn = (entry: {
   buffer: Buffer;
   filename: string;
@@ -159,10 +177,12 @@ async function executeToolCall(
     const sql = toolInput.sql as string;
 
     if (!sql || typeof sql !== "string") {
+      log("query", "REJECTED — missing or invalid sql param");
       return JSON.stringify({ error: "Parámetro 'sql' faltante o inválido." });
     }
 
     if (!isSafeQuery(sql)) {
+      log("query", "BLOCKED by safety check", { sql });
       return JSON.stringify({
         error:
           "Query rechazada por seguridad. Solo se permiten consultas SELECT sin " +
@@ -171,9 +191,12 @@ async function executeToolCall(
       });
     }
 
+    const t0 = Date.now();
     try {
       const results = await query(sql);
       const rowCount = results.length;
+      const elapsed = Date.now() - t0;
+      log("query", "OK", { rows: rowCount, ms: elapsed, sql });
       const preview = results.slice(0, 100);
       return JSON.stringify({
         ok: true,
@@ -185,7 +208,9 @@ async function executeToolCall(
           : undefined,
       });
     } catch (err) {
+      const elapsed = Date.now() - t0;
       const message = err instanceof Error ? err.message : String(err);
+      log("query", "ERROR", { ms: elapsed, error: message, sql });
       return JSON.stringify({
         error: `Error ejecutando la query: ${message}`,
         sql_intentado: sql,
@@ -196,7 +221,9 @@ async function executeToolCall(
   }
 
   if (toolName === "test_connection") {
+    const t0 = Date.now();
     const result = await testConnection();
+    log("db", result.ok ? "Connection OK" : "Connection FAILED", { ms: Date.now() - t0, message: result.message });
     return JSON.stringify(result);
   }
 
@@ -214,9 +241,11 @@ async function executeToolCall(
       return JSON.stringify({ error: "Query rechazada por seguridad. Solo se permiten consultas SELECT." });
     }
 
+    const t0 = Date.now();
     try {
       const data = await query(sql);
       if (data.length === 0) {
+        log("file", "No data returned, skipping file generation", { format, title });
         return JSON.stringify({ error: "La consulta no devolvió resultados. No se puede generar el archivo." });
       }
 
@@ -245,6 +274,8 @@ async function executeToolCall(
 
       const filename = `${sanitizeFilename(title)}.${ext}`;
       const url = storeFile({ buffer, filename, contentType });
+      const elapsed = Date.now() - t0;
+      log("file", "Generated OK", { format, rows: data.length, filename, sizeKB: Math.round(buffer.length / 1024), ms: elapsed });
 
       return JSON.stringify({
         ok: true,
@@ -255,7 +286,9 @@ async function executeToolCall(
         mensaje: `Archivo ${format.toUpperCase()} generado con ${data.length} registro(s).`,
       });
     } catch (err) {
+      const elapsed = Date.now() - t0;
       const message = err instanceof Error ? err.message : String(err);
+      log("file", "ERROR generating file", { format, ms: elapsed, error: message });
       return JSON.stringify({ error: `Error generando archivo: ${message}` });
     }
   }
@@ -300,10 +333,14 @@ export async function runAgent(
   let lastSql = "";
   let lastRowCount = 0;
   let lastResults: Record<string, unknown>[] = [];
+  const agentStart = Date.now();
+
+  log("agent", `START question="${question.slice(0, 120)}"`, { model: MODEL(), historyMsgs: history.length });
 
   while (iterationCount < MAX_TOOL_ITERATIONS) {
     iterationCount++;
 
+    const t0 = Date.now();
     const response = await client.messages.create({
       model: MODEL(),
       max_tokens: 4096,
@@ -312,15 +349,18 @@ export async function runAgent(
       messages,
     });
 
-    console.log(
-      `[agent] Iteración ${iterationCount} | stop_reason: ${response.stop_reason} | ` +
-        `input_tokens: ${response.usage.input_tokens} | output_tokens: ${response.usage.output_tokens}`
-    );
+    log("agent", `Iteration ${iterationCount}`, {
+      stop: response.stop_reason,
+      in_tokens: response.usage.input_tokens,
+      out_tokens: response.usage.output_tokens,
+      llm_ms: Date.now() - t0,
+    });
 
     // Model finished with a text response
     if (response.stop_reason === "end_turn") {
       const textBlock = response.content.find((b) => b.type === "text");
       const answer = textBlock && "text" in textBlock ? textBlock.text : "No se pudo generar una respuesta.";
+      log("agent", "DONE", { iterations: iterationCount, totalMs: Date.now() - agentStart, answerLen: answer.length });
       return {
         answer,
         sql: lastSql,
@@ -341,7 +381,7 @@ export async function runAgent(
       const toolResults: ToolResultBlockParam[] = [];
 
       for (const toolUse of toolUseBlocks) {
-        console.log(`[agent] Ejecutando tool: ${toolUse.name}`, toolUse.input);
+        log("tool", `Calling ${toolUse.name}`, toolUse.input as Record<string, unknown>);
 
         const resultStr = await executeToolCall(
           toolUse.name,
@@ -376,10 +416,12 @@ export async function runAgent(
     }
 
     // Unexpected stop reason (max_tokens, etc.)
+    log("agent", `Unexpected stop_reason: ${response.stop_reason}`, { iteration: iterationCount });
     break;
   }
 
   // Iteration cap reached or unexpected stop
+  log("agent", "ABORTED — iteration cap or unexpected stop", { iterations: iterationCount, totalMs: Date.now() - agentStart });
   return {
     answer:
       "El agente no pudo completar la tarea dentro del número máximo de pasos. " +
@@ -410,6 +452,9 @@ export async function runAgentStream(
   let lastRowCount = 0;
   let lastResults: Record<string, unknown>[] = [];
   let answerText = "";
+  const agentStart = Date.now();
+
+  log("agent-stream", `START question="${question.slice(0, 120)}"`, { model: MODEL(), historyMsgs: history.length });
 
   while (iterationCount < MAX_TOOL_ITERATIONS) {
     iterationCount++;
@@ -419,6 +464,7 @@ export async function runAgentStream(
       message: iterationCount === 1 ? 'Analizando tu pregunta...' : 'Analizando resultados...',
     });
 
+    const t0 = Date.now();
     const stream = client.messages.stream({
       model: MODEL(),
       max_tokens: 4096,
@@ -436,10 +482,12 @@ export async function runAgentStream(
 
     const response = await stream.finalMessage();
 
-    console.log(
-      `[agent] Iteración ${iterationCount} | stop_reason: ${response.stop_reason} | ` +
-        `input_tokens: ${response.usage.input_tokens} | output_tokens: ${response.usage.output_tokens}`
-    );
+    log("agent-stream", `Iteration ${iterationCount}`, {
+      stop: response.stop_reason,
+      in_tokens: response.usage.input_tokens,
+      out_tokens: response.usage.output_tokens,
+      llm_ms: Date.now() - t0,
+    });
 
     // Model finished with a text response
     if (response.stop_reason === "end_turn") {
@@ -447,6 +495,7 @@ export async function runAgentStream(
         const textBlock = response.content.find((b) => b.type === "text");
         answerText = textBlock && "text" in textBlock ? textBlock.text : "No se pudo generar una respuesta.";
       }
+      log("agent-stream", "DONE", { iterations: iterationCount, totalMs: Date.now() - agentStart, answerLen: answerText.length });
       return {
         answer: answerText,
         sql: lastSql,
@@ -467,7 +516,7 @@ export async function runAgentStream(
       const toolResults: ToolResultBlockParam[] = [];
 
       for (const toolUse of toolUseBlocks) {
-        console.log(`[agent] Ejecutando tool: ${toolUse.name}`, toolUse.input);
+        log("tool", `Calling ${toolUse.name}`, toolUse.input as Record<string, unknown>);
 
         emit({
           type: 'tool_call',
@@ -525,10 +574,12 @@ export async function runAgentStream(
     }
 
     // Unexpected stop reason
+    log("agent-stream", `Unexpected stop_reason: ${response.stop_reason}`, { iteration: iterationCount });
     break;
   }
 
   // Iteration cap reached or unexpected stop
+  log("agent-stream", "ABORTED — iteration cap or unexpected stop", { iterations: iterationCount, totalMs: Date.now() - agentStart });
   const fallbackAnswer = answerText ||
     "El agente no pudo completar la tarea dentro del número máximo de pasos. Por favor reformula tu pregunta.";
   return {

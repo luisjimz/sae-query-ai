@@ -75,9 +75,17 @@ app.post("/api/ask", async (c) => {
   // Load or create session
   const sessionId = reqSessionId || crypto.randomUUID();
   const session = (reqSessionId ? loadSession(reqSessionId) : null) ?? createSession(sessionId);
+  const isNew = !reqSessionId;
 
   // Build agent history: only last MAX_HISTORY exchanges
   const historySlice = session.history.slice(-MAX_HISTORY * 2);
+
+  const reqStart = Date.now();
+  console.log(`\n${"=".repeat(70)}`);
+  console.log(`[request] ${new Date().toISOString()} POST /api/ask`);
+  console.log(`[request] session=${sessionId}${isNew ? " (new)" : ""} | history=${historySlice.length} msgs`);
+  console.log(`[request] question: "${question.slice(0, 200)}"`);
+  console.log(`${"=".repeat(70)}`);
 
   return streamSSE(c, async (stream) => {
     try {
@@ -99,7 +107,11 @@ app.post("/api/ask", async (c) => {
         }
       );
 
-      console.log(`[ask] sessionId=${sessionId} toolCalls=${result.toolCallCount}`);
+      const elapsed = ((Date.now() - reqStart) / 1000).toFixed(1);
+      console.log(`${"─".repeat(70)}`);
+      console.log(`[response] toolCalls=${result.toolCallCount} | rows=${result.rowCount} | time=${elapsed}s`);
+      console.log(`[response] answer (${result.answer.length} chars): "${result.answer.slice(0, 150)}..."`);
+      console.log(`${"─".repeat(70)}\n`);
 
       await stream.writeSSE({
         event: "done",
@@ -130,9 +142,13 @@ app.post("/api/ask", async (c) => {
       session.lastActive = Date.now();
       saveSession(session);
     } catch (error) {
+      const elapsed = ((Date.now() - reqStart) / 1000).toFixed(1);
       const message =
         error instanceof Error ? error.message : "Error desconocido";
-      console.error("Error en /api/ask:", message);
+      console.error(`[error] ${message} (after ${elapsed}s)`);
+      if (error instanceof Error && error.stack) {
+        console.error(`[error] ${error.stack.split("\n").slice(1, 4).join("\n")}`);
+      }
       await stream.writeSSE({
         event: "error",
         data: JSON.stringify({ type: "error", message }),
